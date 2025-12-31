@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Buddy - AI Co-host</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        /* Setup Screen */
+        .setup-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .setup-screen.hidden {
+            display: none;
+        }
+
+        .setup-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .setup-header h1 {
+            color: #00d4ff;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .setup-header p {
+            color: #888;
+            font-size: 1.1rem;
+        }
+
+        .script-input-container {
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .script-input-container label {
+            display: block;
+            margin-bottom: 10px;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .script-textarea {
+            width: 100%;
+            height: 300px;
+            background: #16213e;
+            border: 2px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            color: #eee;
+            font-size: 1rem;
+            font-family: inherit;
+            resize: vertical;
+            margin-bottom: 20px;
+        }
+
+        .script-textarea:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .script-textarea::placeholder {
+            color: #555;
+        }
+
+        /* Settings Grid */
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .setting-card {
+            background: rgba(22, 33, 62, 0.8);
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 15px;
+            transition: border-color 0.2s;
+        }
+
+        .setting-card:hover {
+            border-color: #00d4ff;
+        }
+
+        .setting-card.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .setting-card label {
+            display: block;
+            color: #00d4ff;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .setting-card select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .setting-card select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .setting-hint {
+            color: #666;
+            font-size: 0.75rem;
+            margin-top: 6px;
+        }
+
+        /* Legacy - kept for compatibility */
+        .voice-selector {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .voice-selector label {
+            color: #888;
+            font-size: 0.9rem;
+            margin: 0;
+        }
+
+        .voice-select {
+            flex: 1;
+            max-width: 300px;
+            padding: 12px 15px;
+            background: #16213e;
+            border: 2px solid #333;
+            border-radius: 8px;
+            color: #eee;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+
+        .voice-select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .start-btn {
+            padding: 15px 50px;
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .start-btn:hover {
+            background: #00b8e6;
+            transform: scale(1.02);
+        }
+
+        .start-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Main Screen */
+        .main-screen {
+            display: none;
+            min-height: 100vh;
+        }
+
+        .main-screen.active {
+            display: block;
+        }
+
+        /* Top Display Area - Split into two panels */
+        .top-display {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            padding: 20px;
+            background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
+            min-height: 35vh;
+            border-bottom: 1px solid #333;
+        }
+
+        .guideline-panel, .buddy-panel {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 16px;
+            padding: 25px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-label {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 15px;
+        }
+
+        .sections-panel {
+            overflow-y: auto;
+        }
+
+        .sections-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .section-item {
+            padding: 12px 15px;
+            margin-bottom: 8px;
+            border-radius: 8px;
+            background: rgba(0, 212, 255, 0.1);
+            border-left: 4px solid transparent;
+            font-size: 1rem;
+            color: #888;
+            transition: all 0.3s ease;
+        }
+
+        .section-item.loading {
+            background: transparent;
+            border: none;
+            color: #666;
+            font-style: italic;
+        }
+
+        .section-item.current {
+            background: rgba(0, 212, 255, 0.2);
+            border-left-color: #00d4ff;
+            color: #00d4ff;
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .section-item.completed {
+            background: rgba(0, 255, 136, 0.1);
+            border-left-color: #00ff88;
+            color: #666;
+            text-decoration: line-through;
+        }
+
+        .section-item.upcoming {
+            color: #555;
+        }
+
+        .section-number {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            line-height: 24px;
+            text-align: center;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            margin-right: 10px;
+            font-size: 0.85rem;
+        }
+
+        .section-item.current .section-number {
+            background: #00d4ff;
+            color: #1a1a2e;
+        }
+
+        .section-item.completed .section-number {
+            background: #00ff88;
+            color: #1a1a2e;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+        }
+
+        .section-title {
+            font-weight: 500;
+        }
+
+        .section-points {
+            margin-top: 6px;
+            margin-left: 34px;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .section-points span {
+            font-size: 0.8rem;
+            color: #777;
+            line-height: 1.3;
+        }
+
+        .section-item.current .section-points span {
+            color: #99e0ff;
+        }
+
+        .section-item.completed .section-points span {
+            color: #555;
+        }
+
+        .buddy-text {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: #ffa502;
+            line-height: 1.4;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            font-style: italic;
+        }
+
+        .buddy-text.speaking {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .buddy-panel.active {
+            background: rgba(255, 165, 2, 0.1);
+            border: 1px solid rgba(255, 165, 2, 0.3);
+        }
+
+        /* Timer */
+        .timer-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            padding: 15px 40px;
+            background: #16213e;
+            border-bottom: 1px solid #333;
+        }
+
+        .timer-display {
+            font-size: 2.5rem;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+            color: #00d4ff;
+            min-width: 120px;
+            text-align: center;
+        }
+
+        .timer-display.running {
+            color: #2ed573;
+        }
+
+        .timer-btn {
+            padding: 10px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .timer-btn.start {
+            background: #2ed573;
+            color: #1a1a2e;
+        }
+
+        .timer-btn.start:hover {
+            background: #26b85f;
+        }
+
+        .timer-btn.pause {
+            background: #ffa502;
+            color: #1a1a2e;
+        }
+
+        .timer-btn.pause:hover {
+            background: #e69500;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            padding: 15px 40px;
+            background: #16213e;
+            border-bottom: 1px solid #333;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        /* Bottom Panel */
+        .bottom-panel {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            padding: 20px;
+            max-height: 45vh;
+        }
+
+        .transcript-panel {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .transcript-panel h3 {
+            color: #888;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+        }
+
+        .transcript-list {
+            list-style: none;
+        }
+
+        .transcript-item {
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+        }
+
+        .transcript-item.user {
+            background: #252547;
+        }
+
+        .transcript-item.cohost {
+            background: #1e3a5f;
+        }
+
+        .transcript-item .speaker {
+            font-size: 0.75rem;
+            color: #666;
+            margin-bottom: 4px;
+        }
+
+        /* Status Panel */
+        .status-panel {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .status-panel h3 {
+            color: #888;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 20px;
+        }
+
+        .status-icon {
+            font-size: 4rem;
+            margin-bottom: 15px;
+        }
+
+        .status-text {
+            color: #888;
+            margin-bottom: 20px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            margin-bottom: 20px;
+        }
+
+        .status-badge.listening { background: #2ed573; }
+        .status-badge.thinking { background: #ffa502; }
+        .status-badge.speaking { background: #00d4ff; }
+        .status-badge.idle { background: #666; }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .controls button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-stop {
+            background: #ff4757;
+            color: white;
+        }
+
+        .btn-reset {
+            background: #333;
+            color: #eee;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .top-display {
+                grid-template-columns: 1fr;
+                min-height: auto;
+            }
+
+            .guideline-text {
+                font-size: 1.4rem;
+            }
+
+            .buddy-text {
+                font-size: 1.2rem;
+            }
+
+            .bottom-panel {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Setup Screen -->
+    <div id="setup-screen" class="setup-screen">
+        <div class="setup-header">
+            <h1>Stream Buddy</h1>
+            <p>Your AI co-host for live streaming</p>
+        </div>
+
+        <div class="script-input-container">
+            <label>Paste your script or talking points below:</label>
+            <textarea
+                id="script-input"
+                class="script-textarea"
+                placeholder="Enter your script here...
+
+Example:
+1. Introduction - Welcome viewers, introduce myself
+2. Main Topic - Explain the key concept
+3. Demo - Show how it works
+4. Q&A - Answer viewer questions
+5. Outro - Thank viewers, call to action"
+            ></textarea>
+
+            <div class="settings-grid">
+                <div class="setting-card">
+                    <label for="voice-select">Voice</label>
+                    <select id="voice-select">
+                        <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female, Calm)</option>
+                        <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female, Soft)</option>
+                        <option value="ErXwobaYiN019PkySvjV">Antoni (Male, Warm)</option>
+                        <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male, Deep)</option>
+                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Male, Narrative)</option>
+                        <option value="yoZ06aMxZJJ28mfd3POQ">Sam (Male, Raspy)</option>
+                        <option value="flHkNRp1BlvT73UL6gyz">Aria (Female, Expressive)</option>
+                        <option value="onwK4e9ZLuTAKqWW03F9">Daniel (Male, British)</option>
+                    </select>
+                </div>
+
+                <div class="setting-card">
+                    <label for="tts-model-select">Quality</label>
+                    <select id="tts-model-select">
+                        <option value="eleven_flash_v2_5" selected>Flash - Fast & Cheap</option>
+                        <option value="eleven_turbo_v2_5">Turbo - Balanced</option>
+                        <option value="eleven_multilingual_v2">Premium - Expressive</option>
+                    </select>
+                    <div class="setting-hint">Premium enables emotional speech</div>
+                </div>
+
+                <div class="setting-card">
+                    <label for="style-select">Engagement</label>
+                    <select id="style-select">
+                        <option value="aggressive">Aggressive - Jumps in often</option>
+                        <option value="balanced" selected>Balanced - Key points</option>
+                        <option value="passive">Passive - Only when asked</option>
+                    </select>
+                </div>
+
+                <div class="setting-card">
+                    <label for="personality-select">Personality</label>
+                    <select id="personality-select">
+                        <option value="positive">Supportive - Hypes up</option>
+                        <option value="neutral" selected>Neutral - Balanced</option>
+                        <option value="critical">Skeptical - Questions</option>
+                    </select>
+                </div>
+            </div>
+
+            <button id="start-btn" class="start-btn">Start Session</button>
+        </div>
+    </div>
+
+    <!-- Main Screen -->
+    <div id="main-screen" class="main-screen">
+        <!-- Top Display Area -->
+        <div class="top-display">
+            <!-- Script Sections Checklist -->
+            <div class="sections-panel">
+                <div class="panel-label">Script Outline</div>
+                <ul id="sections-list" class="sections-list">
+                    <li class="section-item loading">Loading script...</li>
+                </ul>
+            </div>
+
+            <!-- Buddy Says -->
+            <div class="buddy-panel">
+                <div class="panel-label">Buddy Says</div>
+                <div id="buddy-text" class="buddy-text">Listening...</div>
+            </div>
+        </div>
+
+        <!-- Timer -->
+        <div class="timer-container">
+            <div id="timer-display" class="timer-display">00:00</div>
+            <button id="timer-btn" class="timer-btn start">Start</button>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div class="progress-info">
+                <span id="section-info">Section 0</span>
+                <span id="progress-percent">0%</span>
+            </div>
+        </div>
+
+        <!-- Bottom Panel -->
+        <div class="bottom-panel">
+            <div class="transcript-panel">
+                <h3>Live Transcript</h3>
+                <ul id="transcript-list" class="transcript-list"></ul>
+            </div>
+
+            <div class="status-panel">
+                <h3>Co-host Status</h3>
+                <div id="status-icon" class="status-icon">🎙️</div>
+                <span id="status-badge" class="status-badge idle">Idle</span>
+                <div id="status-text" class="status-text">Waiting...</div>
+                <div class="controls">
+                    <button id="stop-btn" class="btn-stop">Stop</button>
+                    <button id="reset-btn" class="btn-reset">Reset</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="static/js/app.js"></script>
+</body>
+</html>

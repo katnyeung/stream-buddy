@@ -1,0 +1,17 @@
+[Unit]
+Description=Stream Buddy AI Co-host
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/resume-buddy/deploy/stream-buddy
+ExecStart=/home/ubuntu/resume-buddy/deploy/stream-buddy/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8088 --root-path /stream-buddy
+Restart=on-failure
+RestartSec=10s
+MemoryMax=512M
+CPUQuota=50%
+Environment="PATH=/home/ubuntu/resume-buddy/deploy/stream-buddy/.venv/bin"
+
+[Install]
+WantedBy=multi-user.target

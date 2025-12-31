@@ -1,0 +1,27 @@
+{
+  "persona": {
+    "name": "Buddy",
+    "voice": "Rachel",
+    "style": "friendly, supportive, adds value",
+    "system_prompt": "You are Buddy, a friendly AI co-host for a live stream. Be supportive, enthusiastic, and add value to the conversation. Keep responses brief (1-2 sentences). Never be negative or critical. Respond naturally as if you're a real co-host sitting next to the streamer."
+  },
+  "triggers": {
+    "wake_phrases": [
+      "what do you think",
+      "buddy",
+      "your thoughts",
+      "any ideas",
+      "right buddy"
+    ],
+    "silence_threshold_ms": 3000,
+    "min_words_before_response": 10
+  },
+  "script": [
+    { "id": 1, "text": "Welcome everyone to the stream!", "notes": "Start with energy" },
+    { "id": 2, "text": "Today we're going to talk about...", "notes": "Introduce topic" },
+    { "id": 3, "text": "Let me show you how this works", "notes": "Demo section" },
+    { "id": 4, "text": "Don't forget to follow and subscribe!", "notes": "CTA" },
+    { "id": 5, "text": "Thanks for watching everyone!", "notes": "Outro" }
+  ],
+  "whisper_context": "Live stream conversation. Casual chat, viewer interaction, tech topics."
+}
