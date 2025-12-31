@@ -780,21 +780,38 @@ Example:
     </div>
 
     <script>
-        // Demo password protection
-        const DEMO_PASSWORD = 'streambuddy2025';
-
-        function checkPassword() {
+        // Demo password protection (server-side verification)
+        async function checkPassword() {
             const input = document.getElementById('demo-password');
             const error = document.getElementById('password-error');
             const gate = document.getElementById('password-gate');
+            const btn = document.querySelector('.password-box button');
 
-            if (input.value === DEMO_PASSWORD) {
-                gate.classList.add('hidden');
-                sessionStorage.setItem('demo_auth', 'true');
-            } else {
+            btn.disabled = true;
+            btn.textContent = 'Checking...';
+
+            try {
+                const response = await fetch('api/verify-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: input.value })
+                });
+                const data = await response.json();
+
+                if (data.valid) {
+                    gate.classList.add('hidden');
+                    sessionStorage.setItem('demo_auth', 'true');
+                } else {
+                    error.style.display = 'block';
+                    input.value = '';
+                }
+            } catch (e) {
+                error.textContent = 'Error verifying password';
                 error.style.display = 'block';
-                input.value = '';
             }
+
+            btn.disabled = false;
+            btn.textContent = 'Enter';
         }
 
         // Check if already authenticated this session

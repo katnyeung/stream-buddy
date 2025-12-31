@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
@@ -65,6 +66,19 @@ async def get_config():
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+class PasswordRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/verify-password")
+async def verify_password(request: PasswordRequest):
+    """Verify demo password."""
+    demo_password = os.getenv("DEMO_PASSWORD", "streambuddy2025")
+    if request.password == demo_password:
+        return {"valid": True}
+    return {"valid": False}
 
 
 if __name__ == "__main__":
