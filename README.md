@@ -4,6 +4,8 @@ An intelligent AI co-host that listens to your live stream, understands context,
 
 **Live Demo:** [https://resumebuddy.cv/stream-buddy/](https://resumebuddy.cv/stream-buddy/)
 
+#For password please contact me
+
 ---
 
 ## The Problem
