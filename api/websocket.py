@@ -38,6 +38,13 @@ ENRICH_COOLDOWN_MS = 45000  # Default, overridden by style
 REMIND_COOLDOWN_MS = 30000  # Default, overridden by style
 
 
+def format_timestamp(seconds: float) -> str:
+    """Format seconds as MM:SS"""
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins:02d}:{secs:02d}"
+
+
 @router.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):
     """Main WebSocket endpoint - continuous listening loop."""
@@ -66,6 +73,10 @@ async def websocket_stream(websocket: WebSocket):
     selected_style = "balanced"  # Co-host style: aggressive/balanced/passive
     selected_personality = "neutral"  # Co-host personality: positive/neutral/critical
     selected_tts_model = "eleven_flash_v2_5"  # TTS model: flash/turbo/multilingual
+    session_start_time = None  # Track when presentation started
+    target_duration_mins = 10  # Default target duration in minutes
+    all_sections_covered = set()  # Track all sections covered so far
+    conversation_timeline = []  # Track timestamped conversation: [{"time": "00:30", "speaker": "User", "text": "..."}]
 
     # Send ready
     await websocket.send_json({
@@ -102,16 +113,52 @@ async def websocket_stream(websocket: WebSocket):
 
                             structure = await parse_script(session_id, script_text)
                             script_loaded = True
+                            total_sections = structure.get("total_sections", len(structure.get("sections", [])))
+                            # Get target duration from parsed script (LLM extracts from script content)
+                            target_duration_mins = structure.get("target_duration_mins", 10)
 
-                            logger.info(f"[{session_id}] Script parsed in {time.time()-start:.2f}s")
+                            logger.info(f"[{session_id}] Script parsed in {time.time()-start:.2f}s, target: {target_duration_mins}min")
 
                             initial_prompt = await get_current_prompt(session_id)
 
                             await websocket.send_json({
                                 "type": "script_loaded",
                                 "structure": structure,
-                                "initial_prompt": initial_prompt
+                                "initial_prompt": initial_prompt,
+                                "target_duration": target_duration_mins
                             })
+
+                    elif msg_type == "start_presentation":
+                        # User clicked start - begin timer and send welcome greeting
+                        session_start_time = time.time()
+                        all_sections_covered = set()
+                        is_speaking = True
+
+                        # Get structure for welcome message
+                        from core.redis_client import get_script_structure
+                        structure = await get_script_structure(session_id)
+                        total_sections = structure.get("total_sections", 1) if structure else 1
+                        title = structure.get("title", "your presentation") if structure else "your presentation"
+
+                        welcome_text = f"Hi! I'm Buddy, your AI cohost. We have {target_duration_mins} minutes and {total_sections} sections to cover. Let's make this a great presentation! Go ahead and start whenever you're ready."
+
+                        logger.info(f"[{session_id}] Starting presentation, sending welcome")
+
+                        await websocket.send_json({
+                            "type": "cohost_speaking",
+                            "text": welcome_text,
+                            "reason": "Welcome greeting"
+                        })
+
+                        tts_start = time.time()
+                        audio_base64 = await text_to_speech(welcome_text, selected_voice, selected_tts_model)
+                        logger.info(f"[{session_id}] Welcome TTS in {time.time()-tts_start:.2f}s")
+
+                        await websocket.send_json({
+                            "type": "cohost_audio",
+                            "text": welcome_text,
+                            "audio_base64": audio_base64
+                        })
 
                     elif msg_type == "ready_for_audio":
                         is_speaking = False
@@ -158,23 +205,49 @@ async def websocket_stream(websocket: WebSocket):
                         full_transcript = full_transcript.strip()
                         word_count = len(full_transcript.split())
 
-                        logger.info(f"[{session_id}] STT in {stt_time:.2f}s: '{transcript[:60]}...' (total {word_count} words)")
+                        # Add to timeline with timestamp
+                        if session_start_time:
+                            elapsed_secs = now - session_start_time
+                            conversation_timeline.append({
+                                "time": format_timestamp(elapsed_secs),
+                                "speaker": "User",
+                                "text": transcript
+                            })
+                            # Keep last 10 entries
+                            if len(conversation_timeline) > 10:
+                                conversation_timeline.pop(0)
+
+                        logger.info(f"[{session_id}] STT in {stt_time:.2f}s: '{transcript[:60]}...'")
 
                         # Send transcript to frontend
                         await websocket.send_json({
                             "type": "transcript",
-                            "text": transcript,
-                            "full_transcript": full_transcript,
-                            "word_count": word_count
+                            "text": transcript
                         })
 
                         # Only ask brain when we have enough content
                         if word_count >= MIN_WORDS_FOR_BRAIN:
                             brain_start = time.time()
-                            # Only send LATEST transcript, not full accumulation
+                            # Calculate elapsed time
+                            elapsed_mins = 0
+                            if session_start_time:
+                                elapsed_mins = (now - session_start_time) / 60
+
                             # Check if premium model supports emotions
                             supports_emotions = selected_tts_model == "eleven_multilingual_v2"
-                            result = await analyze_progress(session_id, transcript, selected_style, selected_personality, supports_emotions)
+
+                            # Pass timing, coverage, and conversation timeline to brain
+                            result = await analyze_progress(
+                                session_id,
+                                transcript,
+                                selected_style,
+                                selected_personality,
+                                supports_emotions,
+                                elapsed_mins=elapsed_mins,
+                                target_mins=target_duration_mins,
+                                sections_done=list(all_sections_covered),
+                                timeline=conversation_timeline
+                            )
                             brain_time = time.time() - brain_start
 
                             action = result.get("action", "wait")
@@ -182,15 +255,21 @@ async def websocket_stream(websocket: WebSocket):
                             time_since_enrich = (now - last_enrich_time) * 1000
                             sections_covered = result.get("sections_covered", [])
 
-                            logger.info(f"[{session_id}] Brain in {brain_time:.2f}s: action={action}")
-                            logger.info(f"[{session_id}] Sections covered: {sections_covered}, reason: {result.get('reason', '')}")
+                            # Track all sections covered
+                            for sec in sections_covered:
+                                all_sections_covered.add(sec)
+
+                            logger.info(f"[{session_id}] Brain in {brain_time:.2f}s: action={action}, sections: {sections_covered}")
+                            logger.info(f"[{session_id}] Elapsed: {elapsed_mins:.1f}/{target_duration_mins}min, covered: {list(all_sections_covered)}")
 
                             # Send sections progress to frontend
-                            if sections_covered:
-                                await websocket.send_json({
-                                    "type": "sections_progress",
-                                    "sections_covered": sections_covered
-                                })
+                            await websocket.send_json({
+                                "type": "sections_progress",
+                                "sections_covered": list(all_sections_covered),
+                                "elapsed_mins": round(elapsed_mins, 1),
+                                "target_mins": target_duration_mins,
+                                "pacing_hint": result.get("pacing_hint", "")
+                            })
 
                             # Get style-specific cooldowns
                             style_cooldowns = COOLDOWNS.get(selected_style, COOLDOWNS["balanced"])
@@ -215,6 +294,17 @@ async def websocket_stream(websocket: WebSocket):
                                 if speak_text and time_since_enrich >= enrich_cooldown:
                                     is_speaking = True
                                     last_enrich_time = now
+
+                                    # Add to timeline
+                                    elapsed_secs = now - session_start_time if session_start_time else 0
+                                    conversation_timeline.append({
+                                        "time": format_timestamp(elapsed_secs),
+                                        "speaker": "Buddy",
+                                        "text": speak_text
+                                    })
+                                    if len(conversation_timeline) > 10:
+                                        conversation_timeline.pop(0)
+
                                     logger.info(f"[{session_id}] Enrich: '{speak_text[:60]}...'")
 
                                     audio_buffer.clear_all()
@@ -241,6 +331,17 @@ async def websocket_stream(websocket: WebSocket):
                                 if speak_text:
                                     is_speaking = True
                                     last_enrich_time = now  # Reset enrich cooldown too
+
+                                    # Add to timeline
+                                    elapsed_secs = now - session_start_time if session_start_time else 0
+                                    conversation_timeline.append({
+                                        "time": format_timestamp(elapsed_secs),
+                                        "speaker": "Buddy",
+                                        "text": speak_text
+                                    })
+                                    if len(conversation_timeline) > 10:
+                                        conversation_timeline.pop(0)
+
                                     logger.info(f"[{session_id}] Respond: '{speak_text[:60]}...'")
 
                                     audio_buffer.clear_all()

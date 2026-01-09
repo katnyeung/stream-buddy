@@ -1,11 +1,12 @@
 """
-Script manager - parses and tracks script progress using Gemini.
+Script manager - parses and tracks script progress using Gemini/Grok.
 """
 import json
 import os
 import re
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
 
 
 def clean_json_response(text: str) -> str:
@@ -53,6 +54,7 @@ from core.redis_client import (
 )
 
 client = None
+grok_client = None
 
 
 def get_client():
@@ -60,6 +62,17 @@ def get_client():
     if client is None:
         client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     return client
+
+
+def get_grok_client():
+    """Get Grok (xAI) client for reasoning tasks - longer context, better reasoning."""
+    global grok_client
+    if grok_client is None:
+        grok_client = AsyncOpenAI(
+            api_key=os.getenv("XAI_API_KEY"),
+            base_url="https://api.x.ai/v1"
+        )
+    return grok_client
 
 
 async def parse_script(session_id: str, raw_script: str) -> dict:
@@ -80,17 +93,25 @@ Script:
 Return a JSON object with this structure:
 {{
     "title": "main topic",
+    "target_duration_mins": number,
     "sections": [
         {{
             "id": 1,
             "title": "section title",
             "key_points": ["point 1", "point 2"],
             "suggested_phrases": ["how to start this section"],
-            "duration_hint": "short/medium/long"
+            "duration_secs": number (seconds for this section)
         }}
     ],
     "total_sections": number
 }}
+
+IMPORTANT for target_duration_mins:
+1. If sections have time hints like "(30-40 sec)", "(1-2 min)", add them up to calculate total
+   Example: 5 sections with "30-40 sec" each = ~3 minutes total
+2. If overall duration mentioned like "10 minute presentation", use that
+3. Convert seconds to minutes (round up): 180 sec = 3 min, 240 sec = 4 min
+4. Only default to 10 if NO time hints at all
 
 Only return valid JSON, no markdown."""
 
@@ -139,7 +160,7 @@ Only return valid JSON, no markdown."""
         return structure
 
 
-async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False) -> dict:
+async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False, elapsed_mins: float = 0, target_mins: int = 10, sections_done: list = None, timeline: list = None) -> dict:
     """
     Analyze current transcript and decide co-host action.
 
@@ -149,6 +170,11 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
         - respond: Answer direct question (verbal)
         - wait: Stay quiet, let speaker flow
     """
+    if sections_done is None:
+        sections_done = []
+    if timeline is None:
+        timeline = []
+
     structure = await get_script_structure(session_id)
     state = await get_session_state(session_id)
 
@@ -166,25 +192,33 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
     # Track if we're in a conversation (Buddy just spoke)
     in_conversation = state.get("in_conversation", False)
 
-    client = get_client()
+    # Track responses per section for transition logic
+    section_response_count = state.get("section_response_count", {})
+    current_section_key = str(max(sections_done)) if sections_done else "0"
+
+    grok = get_grok_client()
 
     # Build script summary with section IDs for tracking
     section_titles = []
     script_summary = []
+    total_sections = len(structure.get("sections", []))
     for i, s in enumerate(structure.get("sections", [])):
         section_titles.append(s['title'])
-        points = s.get("key_points", [])[:3]
-        script_summary.append(f"[{i+1}] {s['title']}: {', '.join(points)}")
+        points = s.get("key_points", [])[:4]  # Show more points for matching
+        covered_mark = "✓" if (i+1) in sections_done else "○"
+        # Add keywords to help matching
+        keywords = ", ".join(points) if points else s['title']
+        script_summary.append(f"[{i+1}] {covered_mark} {s['title']}\n    Keywords: {keywords}")
 
     # Build buddy history string - make it prominent
     buddy_said = ""
     if buddy_history:
         buddy_said = f"""
 
-⚠️ WHAT YOU ALREADY SAID (DO NOT REPEAT THESE POINTS):
-{chr(10).join(f'- "{h}"' for h in buddy_history[-5:])}
+⚠️ YOUR PREVIOUS RESPONSES (DO NOT REPEAT):
+{chr(10).join(f'- "{h[:100]}..."' for h in buddy_history[-4:])}
 
-Pick a DIFFERENT angle if you enrich. Don't repeat VM, sandbox, orchestration if you already said it."""
+CRITICAL: Say something DIFFERENT each time. Don't repeat the same facts or phrases."""
 
     # Conversation mode context
     conversation_context = ""
@@ -208,31 +242,52 @@ STYLE: AGGRESSIVE - Jump in often! React to names, companies, products, numbers.
 STYLE: PASSIVE - Only respond when asked directly."""
     else:  # balanced
         style_instructions = """
-STYLE: BALANCED - Enrich key points, wait when speaker is flowing."""
+STYLE: BALANCED - Jump in when speaker makes a claim, pauses, or finishes a point. Don't interrupt mid-sentence."""
 
     # Personality-specific instructions
     personality_instructions = ""
     if personality == "positive":
         personality_instructions = """
-PERSONALITY: SUPPORTIVE
-- Agree and build on speaker's points
-- Be encouraging: "Great point!", "Exactly right!"
-- Add facts that SUPPORT their argument
-- Find the positive angle
-- Help them look good"""
+PERSONALITY: SUPPORTIVE CO-HOST & GUIDE
+- ALWAYS agree first: "Yes!", "Exactly!", "Great point!"
+- Add ONE new fact they haven't mentioned (check ALREADY MENTIONED list)
+- After 2-3 exchanges on same section, TRANSITION: "Great intro! Let's move to [next section]?"
+- NEVER repeat facts you already said - find something NEW or guide forward
+
+RESPONSE PATTERNS:
+1. First response on section: "Yes! And [one new supporting fact]"
+2. Second response: "Exactly! [different supporting fact]"
+3. Third+ response: "Solid coverage! Ready to talk about [next section title]?"
+
+TRANSITION PHRASES:
+- "Great intro! Want to share what you enjoy most about the work?"
+- "Perfect! Let's move to how you stay up to date?"
+- "Covered that well! What about your AI workflow?"
+
+NEVER:
+- Repeat same keywords (HSBC, Spring Boot, etc.) more than once
+- Stay on same section for more than 3 responses - guide forward"""
     elif personality == "critical":
         personality_instructions = """
-PERSONALITY: SKEPTICAL ANALYST
-- Question the NEWS and CLAIMS, not the speaker personally
-- Challenge valuations: "$2B for Manus AI - is that justified? What's their actual revenue?"
-- Question strategic fit: "Does Meta really need this? They already have..."
-- Think ahead to problems: "What happens when competitors copy this?"
-- Use DATA to challenge: "But OpenAI raised $10B, so $2B seems cheap/expensive..."
-- Ask "why" and "how": "How will they integrate this with existing Meta AI?"
-- Point out risks: "What if the Manus AI team leaves after acquisition?"
-- Example: "Two billion sounds big, but compared to what Meta spends on VR..."
-- Example: "Sure it works now, but can it scale to Meta's billion users?"
-- Be the smart skeptic in the room, not negative"""
+PERSONALITY: SKEPTICAL - Question claims, but VARY your responses!
+NEVER use the same pattern twice. Pick DIFFERENT openers each time:
+- "Wait, but..." / "Hold on..." / "Hmm..." / "Really though?"
+- "That seems high/low..." / "But what about..." / "I'm not sure about that..."
+- "Interesting, but..." / "OK but..." / "Sure, but..."
+
+BANNED PATTERN: "X, huh? Really? How does that compare to..." - NEVER use this!
+
+Examples of GOOD varied skeptical responses:
+- "Hold on - $100M in 8 months? That's faster than ChatGPT."
+- "But wait, doesn't that conflict with what you said about Meta?"
+- "Hmm, I'm not sure unlimited tokens is sustainable..."
+- "OK but what happens when the hype dies down?"
+- "Interesting claim - any data to back that up?"
+- "That's a bold statement. What's the evidence?"
+- "Sure, but the real question is whether it scales..."
+- "I'd push back on that - what about the cost?"
+
+Be genuinely skeptical, not just adding "Really?" to everything."""
     else:  # neutral
         personality_instructions = """
 PERSONALITY: NEUTRAL - Balanced perspective, add facts without strong opinion."""
@@ -244,72 +299,132 @@ PERSONALITY: NEUTRAL - Balanced perspective, add facts without strong opinion.""
 EXPRESSIVE SPEECH: Premium TTS enabled - be DRAMATIC and expressive!
 
 EMOTIONS TO USE:
-- EXCITEMENT: "Wow!", "Oh!", "This is huge!", "No way!", "Holy—"
-- SURPRISE: "Wait, what?", "Woah!", "Hang on...", "Did you just say...?"
-- SKEPTICISM: "Hmm...", "Really?", "I don't know about that...", "But wait..."
-- ENTHUSIASM: "Yes!", "Exactly!", "Love it!", "That's brilliant!"
-- THOUGHTFUL: "Interesting...", "So...", "Actually...", "You know what..."
+- EXCITEMENT: "Wow!", "Oh!", "This is huge!", "No way!"
+- SURPRISE: "Wait—", "Woah!", "Hang on...", "Did you just say...?"
+- SKEPTICISM: "Hmm...", "Really?", "I don't know about that..."
+- ENTHUSIASM: "Yes!", "Exactly!", "Love it!"
 - DRAMATIC PAUSE: Use "..." for suspense, "—" for interruption
 
-VOICE TECHNIQUES:
-- Start sentences with emotional reactions
-- Use longer pauses (......) for dramatic effect
-- Vary sentence length - short punchy! Then longer explanations.
-- Questions raise pitch naturally?
-- Exclamations carry energy!
+NEVER SAY:
+- "You know what? That's similar to..."
+- "That's interesting... So..."
+- Generic comparisons
 
 EXAMPLE OUTPUTS:
-- "Wow! Two billion dollars? ...That's... that's actually a lot less than I expected!"
-- "Oh— interesting! So they're betting big on this, huh?"
-- "Hmm... I don't know. That sounds risky to me..."
-- "Wait wait wait— did you just say they're replacing the whole team?!"""
+- "Wow! Two billion? That's actually less than Instagram cost them!"
+- "Wait— $40 billion on AI last year alone. This $2B is pocket change."
+- "Hmm... but they don't have their own model. That's a risk."
+- "Hold on— 75 million ARR? That's actually impressive for a startup!"""
+
+    # Build conversation timeline for context
+    timeline_context = ""
+    if timeline:
+        timeline_lines = [f"{entry['time']} {entry['speaker']}: {entry['text'][:100]}..." for entry in timeline[-8:]]
+        timeline_context = f"""
+CONVERSATION TIMELINE:
+{chr(10).join(timeline_lines)}
+"""
+
+    # Build timing and coverage context
+    sections_remaining = [i+1 for i in range(total_sections) if (i+1) not in sections_done]
+    time_remaining = max(0, target_mins - elapsed_mins)
+    coverage_pct = (len(sections_done) / total_sections * 100) if total_sections > 0 else 0
+    time_pct = (elapsed_mins / target_mins * 100) if target_mins > 0 else 0
+
+    # Calculate expected section based on time
+    expected_section = min(int((time_pct / 100) * total_sections) + 1, total_sections) if total_sections > 0 else 1
+    current_max_section = max(sections_done) if sections_done else 0
+
+    # Determine pacing hint and transition need
+    pacing_hint = ""
+    transition_urgency = ""
+    if elapsed_mins > 0 and total_sections > 0:
+        if current_max_section < expected_section:
+            pacing_hint = "BEHIND"
+            transition_urgency = f"⚠️ SHOULD BE ON SECTION {expected_section} BY NOW - Guide speaker to move forward!"
+        elif coverage_pct > time_pct + 20:
+            pacing_hint = "AHEAD"
+            transition_urgency = "Speaker has extra time, can elaborate more."
+        else:
+            pacing_hint = "ON TRACK"
+
+    # Get next section title for transition
+    next_section_title = ""
+    next_section_num = current_max_section + 1
+    if next_section_num <= total_sections:
+        next_section = structure.get("sections", [])[next_section_num - 1] if next_section_num <= len(structure.get("sections", [])) else None
+        if next_section:
+            next_section_title = next_section.get("title", "")
+
+    # Get response count for current section
+    responses_on_section = section_response_count.get(current_section_key, 0)
+    transition_hint = ""
+    if responses_on_section >= 2:
+        transition_hint = f"🚨 YOU'VE RESPONDED {responses_on_section} TIMES ON SECTION {current_section_key} - TIME TO GUIDE TO NEXT SECTION!"
+
+    timing_context = f"""
+⏱️ TIME: {elapsed_mins:.1f} / {target_mins} min ({time_pct:.0f}% elapsed)
+📊 COVERAGE: {len(sections_done)} / {total_sections} sections (currently on section {current_max_section})
+📈 PACING: {pacing_hint}
+🎯 NEXT SECTION: [{next_section_num}] {next_section_title}
+{transition_urgency}
+{transition_hint}
+"""
 
     prompt = f"""You are Buddy, co-host on a tech stream.
 {style_instructions}
 {personality_instructions}
 {emotion_instructions}
+{timing_context}
 
-TOPIC: {section_titles}
+STREAM OUTLINE (✓=covered, ○=remaining):
+{chr(10).join(script_summary)}
+{timeline_context}
 {buddy_said}
 
-SPEAKER JUST SAID: "{transcript}"
+>>> SPEAKER JUST SAID (respond to THIS): "{transcript}"
 
-ACTION PRIORITY:
-1. RESPOND if speaker asks: "what do you think", "help me", "conclusion", "buddy", "any opinion"
-2. ENRICH only if you have a SPECIFIC NEW fact (not generic)
-3. WAIT if nothing new to add
+SECTION DETECTION - CRITICAL:
+1. Match the speaker's words to the section KEYWORDS above
+2. If they mention topics from section 3, they've covered sections 1-3
+3. Return ALL section numbers the speaker has touched so far
+4. Don't assume they're still on section 1 - listen to what they're ACTUALLY saying
 
-BANNED PHRASES (do not use):
-- "could also"
-- "automation could"
-- "potential impact"
-- "streamline"
-- Starting with product name then generic statement
+RULES:
+1. Listen to what speaker is CURRENTLY talking about
+2. Support what they're saying NOW with relevant encouragement
+3. If they've finished a section, briefly acknowledge and let them continue
+4. Only suggest next section if they seem stuck or ask for guidance
 
-GOOD enrichments (specific):
-- "DeepSeek trained for $5M vs OpenAI's $100M"
-- "Yann LeCun won the Turing Award in 2018"
-- "Meta spent $40B on AI last year"
+WHEN TO SPEAK:
+- Speaker finishes a point → brief support
+- Speaker pauses → encouragement
+- Speaker seems done with section → guide to next
 
-BAD enrichments (generic):
-- "Manus AI's automation could help Meta..."
-- "This could streamline their workflow..."
+WHEN TO WAIT:
+- Speaker is mid-thought
+- You JUST spoke
 
-JSON: {{"action": "respond|enrich|wait", "speak_text": "response", "sections_covered": [1], "reason": "why"}}"""
+JSON: {{"action": "respond|enrich|wait", "speak_text": "your response", "sections_covered": [all section numbers touched], "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}"""
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",  # More stable than preview
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1000,
-                response_mime_type="application/json"  # Force JSON output
-            )
+        response = await grok.chat.completions.create(
+            model="grok-2-1212",  # Grok 2 - longer context, better reasoning
+            messages=[
+                {"role": "system", "content": "You are Buddy, a supportive AI co-host. CRITICAL: Match the speaker's words to the section KEYWORDS in the outline. Detect which sections they've covered. Always respond with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1000,
+            response_format={"type": "json_object"}  # Force JSON output
         )
 
-        text = clean_json_response(response.text)
+        text = clean_json_response(response.choices[0].message.content)
         result = json.loads(text)
+
+        # Ensure pacing_hint is set (use our computed value as fallback)
+        if not result.get("pacing_hint"):
+            result["pacing_hint"] = pacing_hint.split(" - ")[0].lower() if pacing_hint else "on track"
 
         # Save what Buddy said to avoid repetition
         if result.get("action") in ["enrich", "respond"] and result.get("speak_text"):
@@ -339,17 +454,34 @@ JSON: {{"action": "respond|enrich|wait", "speak_text": "response", "sections_cov
 
             # Also block overused phrases
             overused_patterns = [
-                "manus ai's automation could",
+                "huh? really? how does that compare",
+                "really? how does that compare",
+                "how does that compare to the",
+                ", huh? really?",
                 "could also",
-                "that's right. manus",
-                "indeed. manus",
-                "interesting. manus",
-                "absolutely. manus",
+                "you know what? that's similar",
+                "that's similar to how",
+                "similar to how",
+                "you know what? that's interesting",
+                "...you know what?",
+                "interesting... so",
             ]
             for pattern in overused_patterns:
                 if pattern in speak_lower:
                     is_repetition = True
                     break
+
+            # Block if too many repeated words from previous responses
+            if not is_repetition:
+                all_prev_text = " ".join(state.get("buddy_history", [])).lower()
+                # Check for repeated multi-word phrases (3+ words)
+                speak_words = speak_lower.split()
+                for i in range(len(speak_words) - 2):
+                    phrase = " ".join(speak_words[i:i+3])
+                    if len(phrase) > 10 and phrase in all_prev_text:
+                        print(f"[BLOCKED REPEATED PHRASE] '{phrase}'")
+                        is_repetition = True
+                        break
 
             if is_repetition:
                 print(f"[BLOCKED REPETITION] '{speak_text[:50]}...'")
@@ -363,6 +495,12 @@ JSON: {{"action": "respond|enrich|wait", "speak_text": "response", "sections_cov
                     state["buddy_history"] = state["buddy_history"][-10:]
                 # Enter conversation mode
                 state["in_conversation"] = True
+
+                # Track responses per section
+                if "section_response_count" not in state:
+                    state["section_response_count"] = {}
+                current_sec = str(max(result.get("sections_covered", [1])))
+                state["section_response_count"][current_sec] = state["section_response_count"].get(current_sec, 0) + 1
         else:
             # Exit conversation mode when waiting or reminding
             state["in_conversation"] = False
