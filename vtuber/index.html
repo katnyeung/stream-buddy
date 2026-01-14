@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live2D Avatar Test - Stream Buddy</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 15px 20px;
+            background: rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.2rem;
+            font-weight: 500;
+        }
+
+        .status {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .status.loading { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .status.ready { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+        .status.error { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        .canvas-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+            min-height: 500px;
+        }
+
+        #avatar-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .control-panel {
+            width: 320px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            overflow-y: auto;
+            max-height: calc(100vh - 100px);
+        }
+
+        .control-section {
+            margin-bottom: 20px;
+        }
+
+        .control-section h3 {
+            font-size: 0.9rem;
+            color: #888;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .control-row {
+            margin-bottom: 12px;
+        }
+
+        .control-row label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            font-size: 0.85rem;
+        }
+
+        .control-row label span {
+            color: #666;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            appearance: none;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #ffa502;
+            cursor: pointer;
+        }
+
+        .button-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        button {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        button.primary {
+            background: rgba(255, 165, 2, 0.3);
+            grid-column: span 2;
+        }
+
+        button.primary:hover {
+            background: rgba(255, 165, 2, 0.5);
+        }
+
+        button.active-mode {
+            background: rgba(76, 175, 80, 0.4);
+            border: 1px solid #4caf50;
+        }
+
+        .audio-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .volume-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .volume-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4caf50, #ffc107, #f44336);
+            transition: width 0.05s;
+        }
+
+        .param-list {
+            font-size: 0.75rem;
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+        }
+
+        .model-url-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+        }
+
+        .model-url-input::placeholder {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Live2D Avatar Test</h1>
+        <div class="status loading" id="status">Loading...</div>
+    </div>
+
+    <div class="main-content">
+        <div class="canvas-container">
+            <canvas id="avatar-canvas"></canvas>
+        </div>
+
+        <div class="control-panel">
+            <!-- Model Loading -->
+            <div class="control-section">
+                <h3>Model</h3>
+                <input type="text" class="model-url-input" id="model-url"
+                    placeholder="Model URL (.model3.json)"
+                    value="https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json">
+                <button class="primary" id="load-model-btn">Load Model</button>
+            </div>
+
+            <!-- Control Mode -->
+            <div class="control-section">
+                <h3>Control Mode</h3>
+                <div class="button-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+                    <button id="mode-strict-btn" class="active-mode">Strict</button>
+                    <button id="mode-hold-btn">Hold+Auto</button>
+                    <button id="mode-auto-btn">Auto</button>
+                </div>
+                <div class="setting-hint" style="margin-top: 8px; color: #888; font-size: 0.75rem;">
+                    Strict: Frozen, no movement at all<br>
+                    Hold+Auto: Position held + physics/breath/blink<br>
+                    Auto: Full idle animations, overrides fade after ~8s
+                </div>
+            </div>
+
+            <!-- Head Movement -->
+            <div class="control-section">
+                <h3>Head Movement</h3>
+                <div class="control-row">
+                    <label>Angle X <span id="angleX-val">0</span></label>
+                    <input type="range" id="angleX" min="-30" max="30" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Angle Y <span id="angleY-val">0</span></label>
+                    <input type="range" id="angleY" min="-30" max="30" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Angle Z <span id="angleZ-val">0</span></label>
+                    <input type="range" id="angleZ" min="-30" max="30" value="0">
+                </div>
+            </div>
+
+            <!-- Mouth -->
+            <div class="control-section">
+                <h3>Mouth</h3>
+                <div class="control-row">
+                    <label>Mouth Open <span id="mouthOpen-val">0</span></label>
+                    <input type="range" id="mouthOpen" min="0" max="1" step="0.01" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Mouth Form <span id="mouthForm-val">0</span></label>
+                    <input type="range" id="mouthForm" min="-1" max="1" step="0.01" value="0">
+                </div>
+            </div>
+
+            <!-- Arms (for testing) -->
+            <div class="control-section">
+                <h3>Arms</h3>
+                <div class="control-row">
+                    <label>Arm L Lift (B) <span id="armLB-val">0</span></label>
+                    <input type="range" id="armLB" min="-1" max="5" step="0.1" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Arm R Lift (B) <span id="armRB-val">0</span></label>
+                    <input type="range" id="armRB" min="-1" max="5" step="0.1" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Arm L Rot (A) <span id="armLA-val">0</span></label>
+                    <input type="range" id="armLA" min="-1" max="1" step="0.1" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Arm R Rot (A) <span id="armRA-val">0</span></label>
+                    <input type="range" id="armRA" min="-1" max="1" step="0.1" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Hand L Change <span id="handChangeL-val">0</span></label>
+                    <input type="range" id="handChangeL" min="0" max="1" step="0.1" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Hand R Change <span id="handChangeR-val">0</span></label>
+                    <input type="range" id="handChangeR" min="0" max="1" step="0.1" value="0">
+                </div>
+            </div>
+
+            <!-- Eyes -->
+            <div class="control-section">
+                <h3>Eyes</h3>
+                <div class="control-row">
+                    <label>Eye Open L <span id="eyeOpenL-val">1</span></label>
+                    <input type="range" id="eyeOpenL" min="0" max="1" step="0.01" value="1">
+                </div>
+                <div class="control-row">
+                    <label>Eye Open R <span id="eyeOpenR-val">1</span></label>
+                    <input type="range" id="eyeOpenR" min="0" max="1" step="0.01" value="1">
+                </div>
+                <div class="control-row">
+                    <label>Eye Ball X <span id="eyeBallX-val">0</span></label>
+                    <input type="range" id="eyeBallX" min="-1" max="1" step="0.01" value="0">
+                </div>
+                <div class="control-row">
+                    <label>Eye Ball Y <span id="eyeBallY-val">0</span></label>
+                    <input type="range" id="eyeBallY" min="-1" max="1" step="0.01" value="0">
+                </div>
+            </div>
+
+            <!-- Expressions -->
+            <div class="control-section">
+                <h3>Quick Expressions</h3>
+                <div class="button-grid">
+                    <button data-expression="neutral">Neutral</button>
+                    <button data-expression="happy">Happy</button>
+                    <button data-expression="thinking">Thinking</button>
+                    <button data-expression="surprised">Surprised</button>
+                    <button data-expression="sad">Sad</button>
+                    <button data-expression="excited">Excited</button>
+                </div>
+                <button id="reset-btn" style="margin-top: 8px; width: 100%;">Reset All</button>
+            </div>
+
+            <!-- Action System Test -->
+            <div class="control-section">
+                <h3>Action System Test</h3>
+                <div class="setting-hint" style="margin-bottom: 8px; color: #888; font-size: 0.75rem;">
+                    Test LLM action tags. Moods persist, gestures play once.
+                </div>
+
+                <!-- Moods -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Moods (persistent)</label>
+                <div class="button-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 12px;">
+                    <button data-mood="neutral">Neutral</button>
+                    <button data-mood="happy">Happy</button>
+                    <button data-mood="friendly">Friendly</button>
+                    <button data-mood="curious">Curious</button>
+                    <button data-mood="thinking">Thinking</button>
+                    <button data-mood="surprised">Surprised</button>
+                    <button data-mood="sad">Sad</button>
+                    <button data-mood="excited">Excited</button>
+                    <button data-mood="serious">Serious</button>
+                    <button data-mood="concerned">Concerned</button>
+                    <button data-mood="skeptical">Skeptical</button>
+                    <button data-mood="confident">Confident</button>
+                    <button id="clear-mood-btn" style="background: #c44;">Clear Mood</button>
+                </div>
+
+                <!-- Gestures - Nods/Shakes -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Nods & Shakes</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="nod">Nod</button>
+                    <button data-gesture="nod_slow">Slow</button>
+                    <button data-gesture="nod_fast">Fast</button>
+                    <button data-gesture="nod_double">Double</button>
+                    <button data-gesture="shake">Shake</button>
+                    <button data-gesture="shake_slow">Slow</button>
+                    <button data-gesture="shake_fast">Fast</button>
+                    <button data-gesture="shake_small">Small</button>
+                </div>
+
+                <!-- Gestures - Eye/Face -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Eyes & Face</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="blink">Blink</button>
+                    <button data-gesture="wink">Wink L</button>
+                    <button data-gesture="wink_right">Wink R</button>
+                    <button data-gesture="eye_roll">Eye Roll</button>
+                    <button data-gesture="look_left">Look L</button>
+                    <button data-gesture="look_right">Look R</button>
+                    <button data-gesture="look_up">Look Up</button>
+                    <button data-gesture="look_away">Away</button>
+                    <button data-gesture="raise_brows">Brows Up</button>
+                    <button data-gesture="furrow_brows">Furrow</button>
+                    <button data-gesture="tilt">Tilt</button>
+                    <button data-gesture="tilt_curious">Curious</button>
+                </div>
+
+                <!-- Gestures - Body/Complex -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Body & Complex</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="lean_in">Lean In</button>
+                    <button data-gesture="lean_back">Lean Back</button>
+                    <button data-gesture="shrug">Shrug</button>
+                    <button data-gesture="bounce">Bounce</button>
+                    <button data-gesture="laugh">Laugh</button>
+                    <button data-gesture="gasp">Gasp</button>
+                    <button data-gesture="sigh">Sigh</button>
+                    <button data-gesture="startle">Startle</button>
+                </div>
+
+                <!-- Gestures - Arms (Lift/B params - the crossed/raised arm) -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Arms - Raised/Crossed</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="wave">Wave</button>
+                    <button data-gesture="wave_small">Wave Sm</button>
+                    <button data-gesture="point">Point</button>
+                    <button data-gesture="hands_up">Hands Up</button>
+                    <button data-gesture="clap">Clap</button>
+                    <button data-gesture="thumbs_up">Thumbs Up</button>
+                    <button data-gesture="arms_crossed">Crossed</button>
+                    <button data-gesture="hand_on_chest">On Chest</button>
+                </div>
+                <!-- Gestures - Arms (Rot/A params - the waist/thigh arm) -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Arms - Waist/Thigh</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="arm_behind">Arm Behind</button>
+                    <button data-gesture="arm_forward">Arm Forward</button>
+                </div>
+
+                <!-- Presentation / Speaking Gestures -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Speaking / Presentation</label>
+                <div class="button-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 8px;">
+                    <button data-gesture="present">Present</button>
+                    <button data-gesture="present_both">Both Hands</button>
+                    <button data-gesture="air_quotes">Air Quotes</button>
+                    <button data-gesture="think_hand">Think</button>
+                    <button data-gesture="make_point">Make Point</button>
+                    <button data-gesture="emphasize">Emphasize</button>
+                    <button data-gesture="listing">Listing</button>
+                    <button data-gesture="welcome">Welcome</button>
+                    <button data-gesture="dismiss_hand">Dismiss</button>
+                    <button data-gesture="sincere">Sincere</button>
+                    <button data-gesture="question_hand">Question</button>
+                    <button data-gesture="calm_down">Calm Down</button>
+                    <button data-gesture="acknowledge_hand">Acknowledge</button>
+                    <button data-gesture="excited_hands">Excited</button>
+                </div>
+
+                <button id="reset-arms-btn" style="width: 100%; margin-bottom: 12px; background: #555;">Reset Arms (Restore Model Control)</button>
+
+                <!-- Command Input -->
+                <label style="font-size: 0.8rem; color: #aaa; margin-bottom: 4px; display: block;">Parse Command String</label>
+                <input type="text" class="model-url-input" id="action-input"
+                    placeholder="[mood:happy] Hello! [gesture:nod]"
+                    value="[mood:friendly] Hello there! [gesture:nod] How are you? [mood:curious]">
+                <button id="parse-action-btn" class="primary">Parse & Execute</button>
+                <div class="param-list" id="action-result" style="margin-top: 8px; max-height: 80px;">Result will appear here</div>
+            </div>
+
+            <!-- Audio Test -->
+            <div class="control-section audio-section">
+                <h3>Audio Lip Sync Test</h3>
+
+                <!-- Local File (no CORS issues) -->
+                <div class="control-row">
+                    <label>Load Local Audio File</label>
+                    <input type="file" accept="audio/*" id="audio-file" style="width: 100%; margin-top: 4px; font-size: 0.8rem;">
+                </div>
+
+                <div class="button-grid" style="margin-top: 10px;">
+                    <button id="play-audio-btn">Play Audio</button>
+                    <button id="stop-audio-btn">Stop</button>
+                    <button id="mic-btn">Use Microphone</button>
+                    <button id="mic-stop-btn">Stop Mic</button>
+                </div>
+
+                <div class="control-row" style="margin-top: 12px;">
+                    <label>Lip Sync Sensitivity <span id="sensitivity-val">1.5</span></label>
+                    <input type="range" id="sensitivity" min="0.5" max="3" step="0.1" value="1.5">
+                </div>
+                <div class="volume-bar">
+                    <div class="volume-bar-fill" id="volume-fill"></div>
+                </div>
+            </div>
+
+            <!-- Debug -->
+            <div class="control-section">
+                <h3>Debug</h3>
+                <button id="list-params-btn" style="width: 100%; margin-bottom: 8px;">List All Parameters</button>
+                <div class="param-list" id="param-list">Click button to list parameters</div>
+                <button id="list-parts-btn" style="width: 100%; margin-top: 8px; margin-bottom: 8px;">List All Parts</button>
+                <div class="param-list" id="parts-list">Click button to list parts</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio element for testing (use local file or replace URL) -->
+    <audio id="test-audio" crossorigin="anonymous"></audio>
+
+    <!-- PIXI.js v6 (compatible with pixi-live2d-display) -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <!-- Live2D Cubism 4 Core SDK (REQUIRED) -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Live2D Display Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <!-- Action System -->
+    <script src="/static/js/action-parser.js"></script>
+    <script src="/static/js/action-library.js"></script>
+    <script src="/static/js/action-executor.js"></script>
+
+    <script src="app.js"></script>
+</body>
+</html>

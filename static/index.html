@@ -95,13 +95,76 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            padding: 40px 20px;
+            padding: 30px 20px;
         }
 
         .setup-screen.hidden {
             display: none;
+        }
+
+        /* Hide avatar and buddy when password gate is showing */
+        .password-gate:not(.hidden) ~ .avatar-section,
+        .password-gate:not(.hidden) ~ .buddy-section {
+            display: none;
+        }
+
+        /* Buddy Speech Section (Below Avatar) */
+        .buddy-section {
+            padding: 15px 20px;
+            background: rgba(255, 165, 2, 0.1);
+            border-bottom: 1px solid #333;
+            text-align: center;
+        }
+
+        .buddy-section .buddy-text {
+            font-size: 1.3rem;
+            font-weight: 500;
+            color: #ffa502;
+            font-style: italic;
+            line-height: 1.4;
+        }
+
+        .buddy-section .buddy-text.speaking {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        /* Sentence queue - stacked sentences with fade-in */
+        .buddy-sentence {
+            display: block;
+            opacity: 0;
+            transform: translateY(10px);
+            animation: sentenceFadeIn 0.4s ease forwards;
+            margin-bottom: 8px;
+        }
+
+        .buddy-sentence:last-child {
+            margin-bottom: 0;
+        }
+
+        .buddy-sentence.current {
+            color: #ffcc00;
+        }
+
+        @keyframes sentenceFadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .buddy-section.active {
+            background: rgba(255, 165, 2, 0.2);
+            border-bottom: 2px solid rgba(255, 165, 2, 0.5);
+        }
+
+        /* Sections Panel Standalone */
+        .sections-panel-standalone {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px;
+            max-height: 30vh;
+            overflow-y: auto;
         }
 
         .setup-header {
@@ -274,24 +337,15 @@
             display: block;
         }
 
-        /* Top Display Area - Split into two panels */
-        .top-display {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            padding: 20px;
-            background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
-            min-height: 35vh;
+        /* Avatar Section (Top, Full Width) */
+        .avatar-section {
+            display: flex;
+            justify-content: center;
+            padding: 15px 20px;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
             border-bottom: 1px solid #333;
         }
 
-        .guideline-panel, .buddy-panel {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 16px;
-            padding: 25px;
-            display: flex;
-            flex-direction: column;
-        }
 
         .panel-label {
             font-size: 0.8rem;
@@ -418,29 +472,58 @@
             color: #999;
         }
 
-        .buddy-text {
-            font-size: 1.5rem;
-            font-weight: 500;
-            color: #ffa502;
-            line-height: 1.4;
-            flex: 1;
-            display: flex;
-            align-items: center;
-            font-style: italic;
+
+        .avatar-container {
+            width: 400px;
+            height: 320px;
+            border-radius: 12px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.3);
+            position: relative;
+            cursor: grab;
         }
 
-        .buddy-text.speaking {
-            animation: pulse 1.5s ease-in-out infinite;
+        .avatar-container.dragging {
+            cursor: grabbing;
+        }
+
+        .avatar-container canvas {
+            width: 100%;
+            height: 100%;
+            transform-origin: center center;
+        }
+
+        .avatar-controls {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            display: flex;
+            gap: 4px;
+            z-index: 10;
+        }
+
+        .avatar-controls button {
+            width: 28px;
+            height: 28px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.6);
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        .avatar-controls button:hover {
+            background: rgba(100, 100, 100, 0.8);
         }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.7; }
-        }
-
-        .buddy-panel.active {
-            background: rgba(255, 165, 2, 0.1);
-            border: 1px solid rgba(255, 165, 2, 0.3);
         }
 
         /* Timer */
@@ -571,6 +654,28 @@
             margin-bottom: 15px;
         }
 
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .popout-btn {
+            background: rgba(0, 212, 255, 0.2);
+            border: 1px solid #00d4ff;
+            color: #00d4ff;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .popout-btn:hover {
+            background: rgba(0, 212, 255, 0.4);
+        }
+
         .transcript-list {
             list-style: none;
         }
@@ -693,6 +798,18 @@
         </div>
     </div>
 
+    <!-- Avatar Section (Always Visible) -->
+    <div id="avatar-section" class="avatar-section">
+        <div id="avatar-container" class="avatar-container">
+            <canvas id="avatar-canvas"></canvas>
+            <div class="avatar-controls">
+                <button id="avatar-zoom-in" title="Zoom In">+</button>
+                <button id="avatar-zoom-out" title="Zoom Out">-</button>
+                <button id="avatar-reset" title="Reset View">R</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Setup Screen -->
     <div id="setup-screen" class="setup-screen">
         <div class="setup-header">
@@ -764,23 +881,22 @@ Example:
         </div>
     </div>
 
+    <!-- Buddy Speech (Below Avatar, Always Visible) -->
+    <div id="buddy-section" class="buddy-section">
+        <div id="buddy-text" class="buddy-text">Listening...</div>
+    </div>
+
     <!-- Main Screen -->
     <div id="main-screen" class="main-screen">
-        <!-- Top Display Area -->
-        <div class="top-display">
-            <!-- Script Sections Checklist -->
-            <div class="sections-panel">
+        <!-- Script Outline -->
+        <div class="sections-panel-standalone">
+            <div class="panel-header">
                 <div class="panel-label">Script Outline</div>
-                <ul id="sections-list" class="sections-list">
-                    <li class="section-item loading">Loading script...</li>
-                </ul>
+                <button class="popout-btn" onclick="window.open('/outline/', 'outline', 'width=400,height=600')">Pop Out</button>
             </div>
-
-            <!-- Buddy Says -->
-            <div class="buddy-panel">
-                <div class="panel-label">Buddy Says</div>
-                <div id="buddy-text" class="buddy-text">Listening...</div>
-            </div>
+            <ul id="sections-list" class="sections-list">
+                <li class="section-item loading">Loading script...</li>
+            </ul>
         </div>
 
         <!-- Timer -->
@@ -861,6 +977,27 @@ Example:
             document.getElementById('password-gate').classList.add('hidden');
         }
     </script>
-    <script src="static/js/app.js"></script>
+
+    <!-- PIXI.js v6 (compatible with pixi-live2d-display) -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <!-- Live2D Cubism 4 Core SDK -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Live2D Display Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <!-- Avatar Modules -->
+    <script src="./static/js/audio-analyzer.js"></script>
+    <script src="./static/js/emotion-detector.js"></script>
+    <script src="./static/js/avatar-controller.js"></script>
+    <script src="./static/js/avatar-state-machine.js"></script>
+    <script src="./static/js/avatar-manager.js"></script>
+
+    <!-- Action System (LLM command tags) -->
+    <script src="./static/js/action-parser.js"></script>
+    <script src="./static/js/action-library.js"></script>
+    <script src="./static/js/action-executor.js"></script>
+
+    <!-- Main App -->
+    <script src="./static/js/app.js"></script>
 </body>
 </html>

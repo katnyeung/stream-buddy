@@ -31,11 +31,14 @@ def should_strip_tags() -> bool:
     return os.getenv("ELEVENLABS_STRIP_TAGS", "true").lower() == "true"
 
 
-def strip_audio_tags(text: str) -> str:
-    """Remove audio tags like [laughs], [sighs], etc. for turbo models."""
-    if not should_strip_tags():
-        return text
-    # Remove bracketed tags like [laughs], [sighs], [music], etc.
+def strip_action_tags(text: str) -> str:
+    """Remove VTuber action tags - these are for avatar control, not TTS."""
+    # Remove VTuber control tags like [mood:X], [gesture:Y], [head:Z], etc.
+    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+\]', '', text).strip()
+
+
+def strip_all_tags(text: str) -> str:
+    """Remove ALL bracketed tags for models that don't support them."""
     return re.sub(r'\[.*?\]', '', text).strip()
 
 
@@ -58,8 +61,12 @@ async def text_to_speech(text: str, voice: str = None, model: str = None) -> str
     voice_id = voice if voice else get_default_voice()
     model_id = model if model else get_model()
 
-    # Strip audio tags for turbo/flash models
-    clean_text = strip_audio_tags(text)
+    # Log which model is being used
+    print(f"[TTS] Using model: {model_id}")
+
+    # Strip VTuber action tags (mood, gesture, head, etc.) - TTS doesn't need them
+    clean_text = strip_action_tags(text)
+
     if not clean_text:
         return ""
 

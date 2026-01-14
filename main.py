@@ -44,11 +44,23 @@ app.include_router(ws_router)
 static_path = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_path), name="static")
 
+# Serve vtuber test directory (for development)
+vtuber_path = Path(__file__).parent / "vtuber"
+if vtuber_path.exists():
+    app.mount("/vtuber", StaticFiles(directory=vtuber_path, html=True), name="vtuber")
+
 
 @app.get("/")
 async def root():
     """Serve the main HTML page."""
     return FileResponse(static_path / "index.html")
+
+
+@app.get("/outline/")
+@app.get("/outline")
+async def outline():
+    """Serve the script outline pop-out page."""
+    return FileResponse(static_path / "outline.html")
 
 
 @app.get("/api/config")
@@ -66,6 +78,27 @@ async def get_config():
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/api/session/{session_id}/outline")
+async def get_session_outline(session_id: str):
+    """Get session outline (structure + progress) from Redis."""
+    from core.redis_client import get_script_structure, get_session_state
+
+    structure = await get_script_structure(session_id)
+    state = await get_session_state(session_id)
+
+    if not structure:
+        return {"found": False}
+
+    # Get covered sections from state (saved by websocket handler)
+    sections_covered = state.get("all_sections_covered", []) if state else []
+
+    return {
+        "found": True,
+        "structure": structure,
+        "sections_covered": sections_covered
+    }
 
 
 class PasswordRequest(BaseModel):

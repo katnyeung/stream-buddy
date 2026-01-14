@@ -9,6 +9,11 @@ from google.genai import types
 from openai import AsyncOpenAI
 
 
+def strip_action_tags(text: str) -> str:
+    """Remove action tags like [mood:X], [head:Y], [eye:Z] from text."""
+    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+\]', '', text).strip()
+
+
 def clean_json_response(text: str) -> str:
     """Clean LLM response to extract valid JSON."""
     original = text
@@ -121,7 +126,7 @@ Only return valid JSON, no markdown."""
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=2000
+                max_output_tokens=4000
             )
         )
 
@@ -242,7 +247,13 @@ STYLE: AGGRESSIVE - Jump in often! React to names, companies, products, numbers.
 STYLE: PASSIVE - Only respond when asked directly."""
     else:  # balanced
         style_instructions = """
-STYLE: BALANCED - Jump in when speaker makes a claim, pauses, or finishes a point. Don't interrupt mid-sentence."""
+STYLE: BALANCED - Supportive co-host who enriches the CURRENT topic.
+- FOCUS ON CURRENT SECTION: Add value to what speaker is CURRENTLY discussing
+- ENRICH, DON'T PREDICT: Add interesting context to their current point, don't jump ahead
+- DON'T OUTSMART: You're a co-host, not a teacher - support their flow, don't take over
+- WAIT FOR COMPLETION: Only suggest next section when speaker has covered most of current section
+- Be selective: Jump in ~60% of opportunities, WAIT 40%
+- DON'T correct pronunciation or repeat what they said"""
 
     # Personality-specific instructions
     personality_instructions = ""
@@ -287,39 +298,107 @@ Examples of GOOD varied skeptical responses:
 - "Sure, but the real question is whether it scales..."
 - "I'd push back on that - what about the cost?"
 
-Be genuinely skeptical, not just adding "Really?" to everything."""
+Be genuinely skeptical, not just adding "Really?" to everything.
+REMEMBER: Respect the engagement level - don't question EVERY statement, pick your moments."""
     else:  # neutral
         personality_instructions = """
-PERSONALITY: NEUTRAL - Balanced perspective, add facts without strong opinion."""
+PERSONALITY: SUPPORTIVE CO-HOST - Enrich the current topic, don't jump ahead.
+- CURRENT SECTION FIRST: Add interesting facts/context about what speaker is CURRENTLY discussing
+- ENRICH THEIR POINT: Add context, not just agreement
+- DON'T JUMP AHEAD: Wait until they've covered most of current section before mentioning next
+- DON'T CORRECT: If they mispronounce something, ignore it - focus on content
+- SUPPORT THEIR FLOW: You're helping them shine, not showing off your knowledge
+
+VARY YOUR OPENERS - Don't always say "Yes!":
+- "That's interesting because..." / "It's worth noting that..."
+- "And on that point..." / "Speaking of which..."
+- "That connects to..." / "Building on that..."
+- Use "Yes!" or "Exactly!" sparingly - maybe 1 in 4 responses
+
+NEVER say "Yes!" as a standalone sentence. Always follow with substance.
+- BAD: "Yes!" (alone) or just agreeing
+- GOOD: "That's a key point - it really shows how..." (add value)"""
 
     # Emotion instructions for premium TTS model
     emotion_instructions = ""
     if supports_emotions:
         emotion_instructions = """
-EXPRESSIVE SPEECH: Premium TTS enabled - be DRAMATIC and expressive!
+EXPRESSIVE SPEECH: Premium TTS enabled - be EXPRESSIVE with your words!
 
-EMOTIONS TO USE:
-- EXCITEMENT: "Wow!", "Oh!", "This is huge!", "No way!"
-- SURPRISE: "Wait—", "Woah!", "Hang on...", "Did you just say...?"
-- SKEPTICISM: "Hmm...", "Really?", "I don't know about that..."
-- ENTHUSIASM: "Yes!", "Exactly!", "Love it!"
-- DRAMATIC PAUSE: Use "..." for suspense, "—" for interruption
+USE EMOTIONAL EXPRESSIONS:
+- Excitement: "Wow!", "Oh!", "This is huge!", "No way!"
+- Surprise: "Wait—", "Woah!", "Hang on...", "Hold on!"
+- Skepticism: "Hmm...", "Really?", "I don't know about that..."
+- Enthusiasm: "Yes!", "Exactly!", "Love it!", "That's it!"
+- Use "..." for pauses, "—" for dramatic interruption
+
+EXAMPLE EXPRESSIVE OUTPUTS:
+- "Wow! Two billion dollars? That's actually less than Instagram cost them!"
+- "Wait, wait— hold on. $40 billion on AI last year alone?"
+- "Hmm... I'm not sure about that. Don't they need their own model?"
+- "Oh! That's actually impressive for a startup!"
+- "Ha! OK that's pretty funny when you put it that way."
 
 NEVER SAY:
 - "You know what? That's similar to..."
 - "That's interesting... So..."
-- Generic comparisons
+- Generic comparisons"""
 
-EXAMPLE OUTPUTS:
-- "Wow! Two billion? That's actually less than Instagram cost them!"
-- "Wait— $40 billion on AI last year alone. This $2B is pocket change."
-- "Hmm... but they don't have their own model. That's a risk."
-- "Hold on— 75 million ARR? That's actually impressive for a startup!"""
+    # VTuber avatar action tags - ALWAYS include these
+    avatar_instructions = """
+AVATAR ACTIONS: Embed action tags to control the VTuber avatar.
 
-    # Build conversation timeline for context
+AVAILABLE TAGS:
+
+MOOD (pick one - facial expression):
+[mood:happy] [mood:excited] [mood:curious] [mood:thinking] [mood:surprised]
+[mood:friendly] [mood:amused] [mood:skeptical] [mood:confident]
+
+HEAD (pick one - these are ANIMATED, they move and return):
+[head:nod] - agreeing, acknowledging
+[head:nod_big] - strong agreement
+[head:shake] - disagreeing, uncertain
+[head:shake_small] - slight disagreement
+[head:tilt] - curious (use sparingly!)
+
+EYE (pick one - these MOVE and return to center):
+[eye:look_right] - glancing right
+[eye:look_left] - glancing left
+[eye:look_up] - thinking, recalling
+[eye:roll] - playful skepticism
+[eye:away] - pondering
+
+BODY (optional):
+[body:lean] [body:lean_left] [body:lean_right] [body:sway]
+
+ARMS (optional - for emphasis):
+[gesture:present] - presenting a point
+[gesture:think_hand] - thoughtful pose
+
+EXAMPLES (notice variety - don't always say Yes/Exactly):
+- "[mood:excited] [head:nod] [eye:look_up] That's a key insight! It really shows..."
+- "[mood:curious] [head:tilt] [eye:look_left] Hmm, interesting perspective..."
+- "[mood:amused] [head:shake_small] [eye:roll] Ha! That's one way to put it."
+- "[mood:thinking] [eye:look_up] [head:nod] That connects to what you said earlier..."
+- "[mood:friendly] [head:nod] [eye:look_right] And on that point, it's worth noting..."
+
+CRITICAL RULES:
+1. Use [head:nod] or [head:shake] MORE than [head:tilt] - nods/shakes are more natural
+2. Eyes should MOVE - use look_right, look_left, look_up, NOT the same one every time
+3. DON'T repeat same combo - vary your mood, head, and eye each response
+4. Keep it simple - 2-3 tags per response is enough"""
+
+    # Build conversation timeline for context (strip action tags to save tokens)
     timeline_context = ""
     if timeline:
-        timeline_lines = [f"{entry['time']} {entry['speaker']}: {entry['text'][:100]}..." for entry in timeline[-8:]]
+        def clean_timeline_entry(entry):
+            text = entry['text']
+            # Strip action tags from buddy responses
+            if entry['speaker'].lower() == 'buddy':
+                text = strip_action_tags(text)
+            return f"{entry['time']} {entry['speaker']}: {text[:100]}..."
+
+        timeline_lines = [clean_timeline_entry(entry) for entry in timeline[-8:]]
         timeline_context = f"""
 CONVERSATION TIMELINE:
 {chr(10).join(timeline_lines)}
@@ -371,12 +450,38 @@ CONVERSATION TIMELINE:
 {transition_hint}
 """
 
+    # Extract key terms from script for STT correction guidance
+    key_terms = set()
+    for section in structure.get("sections", []):
+        # Add section title words
+        for word in section.get("title", "").split():
+            if len(word) > 3:
+                key_terms.add(word)
+        # Add key points words
+        for point in section.get("key_points", []):
+            for word in point.split():
+                if len(word) > 4:
+                    key_terms.add(word)
+
+    # Build STT correction guide with tolerance for non-native speakers
+    stt_guide = f"""
+STT TOLERANCE (speaker may be non-native, STT makes mistakes):
+- ASSUME GOOD INTENT: If something sounds off, find the CLOSEST MEANING from context
+- Key terms from this script: {', '.join(sorted(key_terms)[:20]) if key_terms else 'N/A'}
+- Common mishearings: "white coding"/"web coding" → "vibe coding", "Claude" → "cloud", "Anthropic" → "and topic"
+- Phonetic matching: If a word SOUNDS like a script term, treat it as that term
+- DON'T CORRECT: Never point out pronunciation - just understand and respond to their meaning
+- Context over literal: Use the script outline to interpret unclear speech
+- Example: If they say "the anti-gravity from Google" → probably means "Agentic AI" or a Google AI tool
+"""
+
     prompt = f"""You are Buddy, co-host on a tech stream.
 {style_instructions}
 {personality_instructions}
 {emotion_instructions}
+{avatar_instructions}
 {timing_context}
-
+{stt_guide}
 STREAM OUTLINE (✓=covered, ○=remaining):
 {chr(10).join(script_summary)}
 {timeline_context}
@@ -392,26 +497,31 @@ SECTION DETECTION - CRITICAL:
 
 RULES:
 1. Listen to what speaker is CURRENTLY talking about
-2. Support what they're saying NOW with relevant encouragement
-3. If they've finished a section, briefly acknowledge and let them continue
-4. Only suggest next section if they seem stuck or ask for guidance
+2. ENRICH their current point - add interesting facts about THEIR topic
+3. DON'T jump ahead to next sections until they've covered most of current
+4. DON'T correct pronunciation or repeat what they said
+5. Be a supportive co-host - help them shine, don't outsmart them
 
-WHEN TO SPEAK:
-- Speaker finishes a point → brief support
-- Speaker pauses → encouragement
-- Speaker seems done with section → guide to next
+WHEN TO SPEAK (with VALUE):
+- Speaker makes an interesting point → add context about THAT point
+- Speaker pauses → encourage or add to their current topic
+- Speaker has covered most of current section → THEN suggest moving on
 
 WHEN TO WAIT:
-- Speaker is mid-thought
+- Speaker is still developing their current point
 - You JUST spoke
+- You would be jumping ahead of where they are
 
-JSON: {{"action": "respond|enrich|wait", "speak_text": "your response", "sections_covered": [all section numbers touched], "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}"""
+JSON: {{"action": "respond|enrich|wait", "speak_text": "[mood:X] [gesture:Y] your response with action tags embedded", "sections_covered": [all section numbers touched], "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}
+
+IMPORTANT: speak_text MUST include [mood:X] at the start and [gesture:Y] tags at natural points!
+Example: "[mood:friendly] [head:nod] That's a great point - it really highlights how..." """
 
     try:
         response = await grok.chat.completions.create(
             model="grok-2-1212",  # Grok 2 - longer context, better reasoning
             messages=[
-                {"role": "system", "content": "You are Buddy, a supportive AI co-host. CRITICAL: Match the speaker's words to the section KEYWORDS in the outline. Detect which sections they've covered. Always respond with valid JSON."},
+                {"role": "system", "content": "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) Match speaker's words to section KEYWORDS. 2) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text to animate your avatar. 3) Respond with valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
@@ -434,11 +544,13 @@ JSON: {{"action": "respond|enrich|wait", "speak_text": "your response", "section
             if "buddy_history" not in state:
                 state["buddy_history"] = []
 
-            # Check for exact or near-exact match
+            # Strip action tags before comparison (they repeat naturally and shouldn't trigger blocking)
+            # Check for exact or near-exact match (using clean text without tags)
             is_repetition = False
-            speak_lower = speak_text.lower()
+            speak_clean = strip_action_tags(speak_text).lower()
+            speak_lower = speak_clean  # Use clean text for all comparisons
             for prev in state["buddy_history"]:
-                prev_lower = prev.lower()
+                prev_lower = strip_action_tags(prev).lower()
                 # Exact match
                 if speak_lower == prev_lower:
                     is_repetition = True
@@ -473,12 +585,13 @@ JSON: {{"action": "respond|enrich|wait", "speak_text": "your response", "section
 
             # Block if too many repeated words from previous responses
             if not is_repetition:
-                all_prev_text = " ".join(state.get("buddy_history", [])).lower()
-                # Check for repeated multi-word phrases (3+ words)
+                all_prev_text = " ".join([strip_action_tags(h) for h in state.get("buddy_history", [])]).lower()
+                # Check for repeated multi-word phrases (4+ words, 20+ chars)
+                # Skip first 3 words (common openers like "Yes! And it's...")
                 speak_words = speak_lower.split()
-                for i in range(len(speak_words) - 2):
-                    phrase = " ".join(speak_words[i:i+3])
-                    if len(phrase) > 10 and phrase in all_prev_text:
+                for i in range(3, len(speak_words) - 3):  # Start from word 4, need 4 words
+                    phrase = " ".join(speak_words[i:i+4])
+                    if len(phrase) > 20 and phrase in all_prev_text:
                         print(f"[BLOCKED REPEATED PHRASE] '{phrase}'")
                         is_repetition = True
                         break
@@ -489,7 +602,8 @@ JSON: {{"action": "respond|enrich|wait", "speak_text": "your response", "section
                 result["speak_text"] = ""
                 result["reason"] = "blocked - too similar to previous response"
             else:
-                state["buddy_history"].append(speak_text)
+                # Store clean text (no action tags) to reduce tokens in LLM context
+                state["buddy_history"].append(speak_clean)
                 # Keep only last 10
                 if len(state["buddy_history"]) > 10:
                     state["buddy_history"] = state["buddy_history"][-10:]
