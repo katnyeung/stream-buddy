@@ -2,8 +2,11 @@
 Stream Buddy - AI Co-host for Streamers
 FastAPI application entry point.
 """
+import asyncio
 import json
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -14,6 +17,10 @@ from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Config cache
 _config: dict | None = None

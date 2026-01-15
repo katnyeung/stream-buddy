@@ -33,8 +33,8 @@ def should_strip_tags() -> bool:
 
 def strip_action_tags(text: str) -> str:
     """Remove VTuber action tags - these are for avatar control, not TTS."""
-    # Remove VTuber control tags like [mood:X], [gesture:Y], [head:Z], etc.
-    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+\]', '', text).strip()
+    # Remove VTuber control tags like [mood:X], [gesture:Y], [head:Z,repeat:2,delay:500], etc.
+    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+(?:,[^\]]+)?\]', '', text).strip()
 
 
 def strip_all_tags(text: str) -> str:

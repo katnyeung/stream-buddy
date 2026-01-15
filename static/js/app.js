@@ -790,8 +790,8 @@ class StreamBuddy {
             if (timeSinceLastGesture > 3000 + Math.random() * 2000) {  // Every 3-5 seconds
                 this.lastListeningGesture = now;
                 if (this.avatarEnabled && this.actionExecutor) {
-                    // Random listening gesture (nods, eye movements)
-                    const gestures = ['nod_slow', 'nod', 'nod_slow', 'look_up', 'look_right', 'look_left'];
+                    // Random listening gesture (mostly nods, rarely eye movements)
+                    const gestures = ['nod_slow', 'nod', 'nod_slow', 'nod', 'nod_slow', 'look_up'];
                     // Smiling moods for engaged listening
                     const moods = ['friendly', 'happy', 'amused', 'interested', 'neutral'];
                     const gesture = gestures[Math.floor(Math.random() * gestures.length)];

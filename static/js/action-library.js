@@ -24,7 +24,7 @@ const ACTION_LIBRARY = {
     moods: {
         neutral: {
             params: {
-                angleX: 0, angleY: 0, angleZ: 0,
+                angleX: 0, angleY: 0, angleZ: 2,
                 mouthForm: 0,
                 eyeOpenL: 1, eyeOpenR: 1,
                 eyeBallX: 0, eyeBallY: 0,
@@ -67,10 +67,10 @@ const ACTION_LIBRARY = {
 
         thinking: {
             params: {
-                angleX: -12, angleY: 10, angleZ: 5,
+                angleX: -5, angleY: 5, angleZ: 3,
                 mouthForm: 0.1,
-                eyeOpenL: 0.7, eyeOpenR: 0.8,
-                eyeBallX: -0.5, eyeBallY: 0.3,
+                eyeOpenL: 0.8, eyeOpenR: 0.85,
+                eyeBallX: 0, eyeBallY: 0,
                 browLY: -0.1, browRY: 0.2
             },
             transition: 600
@@ -474,8 +474,8 @@ const ACTION_LIBRARY = {
         look_up: {
             keyframes: [
                 { t: 0.0, eyeBallY: 0, angleY: 0 },
-                { t: 0.2, eyeBallY: -0.5, angleY: -8 },
-                { t: 0.7, eyeBallY: -0.5, angleY: -8 },
+                { t: 0.2, eyeBallY: 0.5, angleY: 8 },
+                { t: 0.7, eyeBallY: 0.5, angleY: 8 },
                 { t: 1.0, eyeBallY: 0, angleY: 0 }
             ],
             duration: 1000,
@@ -485,8 +485,8 @@ const ACTION_LIBRARY = {
         look_down: {
             keyframes: [
                 { t: 0.0, eyeBallY: 0, angleY: 0 },
-                { t: 0.2, eyeBallY: 0.5, angleY: 8 },
-                { t: 0.7, eyeBallY: 0.5, angleY: 8 },
+                { t: 0.2, eyeBallY: -0.5, angleY: -8 },
+                { t: 0.7, eyeBallY: -0.5, angleY: -8 },
                 { t: 1.0, eyeBallY: 0, angleY: 0 }
             ],
             duration: 1000,
@@ -660,6 +660,30 @@ const ACTION_LIBRARY = {
                 { t: 1.0, bodyAngleX: 0, angleZ: 0 }
             ],
             duration: 2000,
+            relative: true
+        },
+
+        // Subtle idle sway - gentle head tilt for natural idle movement
+        idle_sway: {
+            keyframes: [
+                { t: 0.0, angleZ: 0, angleY: 0 },
+                { t: 0.25, angleZ: 3, angleY: -2 },
+                { t: 0.5, angleZ: 0, angleY: 0 },
+                { t: 0.75, angleZ: -3, angleY: 2 },
+                { t: 1.0, angleZ: 0, angleY: 0 }
+            ],
+            duration: 4000,
+            relative: true
+        },
+
+        // Very subtle breathing-like movement
+        idle_breathe: {
+            keyframes: [
+                { t: 0.0, angleY: 0, bodyAngleY: 0 },
+                { t: 0.5, angleY: 2, bodyAngleY: 1 },
+                { t: 1.0, angleY: 0, bodyAngleY: 0 }
+            ],
+            duration: 3000,
             relative: true
         },
 

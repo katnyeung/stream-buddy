@@ -601,7 +601,6 @@ class AvatarTest {
                 }
                 if (index >= 0 && index < coreModel._partOpacities.length) {
                     coreModel._partOpacities[index] = opacity;
-                    console.log(`Set part ${partIdOrIndex} opacity to ${opacity}`);
                     return true;
                 }
             }
@@ -618,7 +617,6 @@ class AvatarTest {
                     }
                 }
                 coreModel.setPartOpacityByIndex(index, opacity);
-                console.log(`Set part ${partIdOrIndex} opacity to ${opacity}`);
                 return true;
             }
         } catch (e) {

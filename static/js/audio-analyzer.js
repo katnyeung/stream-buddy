@@ -10,7 +10,7 @@ class AudioAnalyzer {
         this.dataArray = null;
         this.connectedSources = new WeakMap(); // Track connected audio elements
         this.smoothedVolume = 0;
-        this.smoothingFactor = 0.3; // Lower = smoother, higher = more responsive
+        this.smoothingFactor = 0.88; // Higher = smoother/slower, lower = more responsive
         this.sensitivity = 1.5;
         this.threshold = 0.02; // Minimum volume to register
     }
@@ -24,7 +24,7 @@ class AudioAnalyzer {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         this.analyser = this.audioContext.createAnalyser();
         this.analyser.fftSize = 256;
-        this.analyser.smoothingTimeConstant = 0.5;
+        this.analyser.smoothingTimeConstant = 0.6; // Lower = more responsive frequency data
         this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
 
         // Connect analyser to destination so we can still hear the audio

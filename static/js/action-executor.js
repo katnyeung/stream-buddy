@@ -28,6 +28,7 @@ class ActionExecutor {
         this.currentMood = null;
         this.currentMoodName = 'neutral';
         this.moodParams = {};  // Current mood parameter values
+        this.moodEnforced = false;  // Whether to enforce mood params every frame
 
         // Mood transition
         this.moodTransition = {
@@ -48,6 +49,9 @@ class ActionExecutor {
 
         // Parameter exclusions (e.g., mouth during lip sync)
         this.excludedParams = new Set();
+
+        // Persistent offsets for stacking actions (e.g., look_right x3 = look further right)
+        this.persistentOffsets = {};
 
         // Arm part visibility state
         this.armPartState = null;  // 'A' = waist arms, 'B' = raised arms, null = no override
@@ -70,7 +74,7 @@ class ActionExecutor {
     }
 
     /**
-     * Initialize with neutral mood params
+     * Initialize with neutral mood params (unlocked - just sets defaults)
      */
     _initNeutralMood() {
         const neutral = this.library.getMood('neutral');
@@ -78,6 +82,7 @@ class ActionExecutor {
             this.currentMood = neutral;
             this.currentMoodName = 'neutral';
             this.moodParams = { ...neutral.params };
+            this.moodEnforced = false;  // Not locked - avatar is free to move
         }
     }
 
@@ -88,6 +93,12 @@ class ActionExecutor {
         if (this.isRunning) return;
         this.isRunning = true;
         this.lastTime = performance.now();
+
+        // Initialize arm visibility to B (raised arms for gestures)
+        if (this.setPartOpacity && this.armPartState === null) {
+            this._showArmParts('B');
+        }
+
         this._animationLoop();
         console.log('[ActionExecutor] Started');
     }
@@ -152,9 +163,7 @@ class ActionExecutor {
 
         // If a new gesture specifies a layer, switch to it
         if (activeLayer !== null && activeLayer !== this.armPartState) {
-            // Switching arm layers - could add fade here if needed
-            this.armPartState = activeLayer;
-            console.log(`[ActionExecutor] Switched to arm layer: ${activeLayer}`);
+            this._showArmParts(activeLayer);
         }
         // When gesture ends, keep the same arm layer visible (don't switch back)
 
@@ -164,18 +173,8 @@ class ActionExecutor {
             return;
         }
 
-        // Enforce visibility based on current arm state (persists after gesture ends)
-        if (this.armPartState === 'B') {
-            this.setPartOpacity('Part01ArmRB001', 1);
-            this.setPartOpacity('Part01ArmLB001', 1);
-            this.setPartOpacity('Part01ArmRA001', 0);
-            this.setPartOpacity('Part01ArmLA001', 0);
-        } else if (this.armPartState === 'A') {
-            this.setPartOpacity('Part01ArmRA001', 1);
-            this.setPartOpacity('Part01ArmLA001', 1);
-            this.setPartOpacity('Part01ArmRB001', 0);
-            this.setPartOpacity('Part01ArmLB001', 0);
-        }
+        // Only enforce visibility when state actually changes (avoid spamming setPartOpacity every frame)
+        // The actual switching is done in _showArmParts() when armPartState changes
         // When armPartState is null, let model control parts naturally
     }
 
@@ -268,6 +267,7 @@ class ActionExecutor {
 
         this.currentMood = mood;
         this.currentMoodName = moodName;
+        this.moodEnforced = true;  // Lock during transition
 
         console.log(`[ActionExecutor] Mood: ${moodName} (intensity: ${intensity}, duration: ${duration}ms)`);
         return true;
@@ -317,6 +317,66 @@ class ActionExecutor {
 
         console.log(`[ActionExecutor] Gesture: ${gestureName} (intensity: ${intensity}, duration: ${duration}ms)`);
         return true;
+    }
+
+    /**
+     * Stack a gesture's peak values - accumulates with each call
+     * E.g., stackGesture('look_right') x3 = look further right
+     * @param {string} gestureName
+     * @param {object} options - { intensity }
+     */
+    stackGesture(gestureName, options = {}) {
+        const gesture = this.library.getGesture(gestureName);
+        if (!gesture || !gesture.keyframes) {
+            console.warn(`[ActionExecutor] Unknown gesture for stacking: ${gestureName}`);
+            return false;
+        }
+
+        const intensity = (options.intensity ?? 1) * this.globalIntensity;
+
+        // Find the peak values from keyframes (max absolute value for each param)
+        const peakValues = {};
+        for (const kf of gesture.keyframes) {
+            for (const [key, value] of Object.entries(kf)) {
+                if (key === 't') continue;
+                const absValue = Math.abs(value);
+                if (peakValues[key] === undefined || absValue > Math.abs(peakValues[key])) {
+                    peakValues[key] = value;
+                }
+            }
+        }
+
+        // Add peak values to persistent offsets
+        for (const [key, value] of Object.entries(peakValues)) {
+            const scaledValue = value * intensity;
+            this.persistentOffsets[key] = (this.persistentOffsets[key] || 0) + scaledValue;
+        }
+
+        console.log(`[ActionExecutor] Stacked: ${gestureName} (intensity: ${intensity})`, this.persistentOffsets);
+        return true;
+    }
+
+    /**
+     * Clear all persistent offsets (reset stacked actions)
+     */
+    clearStack() {
+        this.persistentOffsets = {};
+        console.log('[ActionExecutor] Stack cleared');
+    }
+
+    /**
+     * Clear specific parameter from stack
+     * @param {string} paramName
+     */
+    clearStackParam(paramName) {
+        delete this.persistentOffsets[paramName];
+    }
+
+    /**
+     * Get current stack state
+     */
+    getStack() {
+        return { ...this.persistentOffsets };
     }
 
     /**
@@ -410,11 +470,37 @@ class ActionExecutor {
             duration: action.params.duration ? action.params.duration * 1000 : undefined
         };
 
+        // Check for repeat mode - play multiple times with delay
+        const repeatCount = action.params.repeat || action.params.times || 1;
+        const repeatDelay = action.params.delay || action.params.interval || 1000; // ms between repeats
+
+        // Check for stack mode - accumulates instead of animating
+        const useStack = action.params.stack === true || action.params.stack === 'true';
+
+        // Helper to play gesture (with repeat support)
+        const playWithRepeat = (gestureName) => {
+            if (repeatCount > 1) {
+                // Repeat: play multiple times (stack only if stack:true)
+                console.log(`[ActionExecutor] ${useStack ? 'Stacking' : 'Playing'} ${gestureName} x${repeatCount} (delay: ${repeatDelay}ms)`);
+                for (let i = 0; i < repeatCount; i++) {
+                    setTimeout(() => {
+                        if (useStack) {
+                            this.stackGesture(gestureName, options);
+                        } else {
+                            this.playGesture(gestureName, options);
+                        }
+                    }, i * repeatDelay);
+                }
+                return true;
+            }
+            return useStack ? this.stackGesture(gestureName, options) : this.playGesture(gestureName, options);
+        };
+
         switch (action.type) {
             case 'mood':
                 return this.setMood(action.name, options);
             case 'gesture':
-                return this.playGesture(action.name, options);
+                return playWithRepeat(action.name);
             case 'action':
                 return this.executeAction(action.name, options);
             // Alias categories - resolve through library and play as gesture
@@ -425,11 +511,18 @@ class ActionExecutor {
                 const resolved = this.library.get(action.type, action.name);
                 if (resolved && resolved.type === 'gesture' && resolved.data) {
                     console.log(`[ActionExecutor] ${action.type}:${action.name} -> gesture:${resolved.name}`);
-                    return this.playGesture(resolved.name, options);
+                    return playWithRepeat(resolved.name);
                 }
                 console.warn(`[ActionExecutor] Unknown ${action.type}: ${action.name}`);
                 return false;
             }
+            // Special: clear stack
+            case 'stack':
+                if (action.name === 'clear') {
+                    this.clearStack();
+                    return true;
+                }
+                return false;
             default:
                 console.warn(`[ActionExecutor] Unknown action type: ${action.type}`);
                 return false;
@@ -516,6 +609,9 @@ class ActionExecutor {
         if (progress >= 1) {
             this.moodTransition.active = false;
             this.moodParams = { ...this.moodTransition.targetParams };
+            // Release the lock after transition completes - params are set, no need to enforce every frame
+            this.moodEnforced = false;
+            console.log(`[ActionExecutor] Mood transition complete - unlocked`);
         }
     }
 
@@ -605,26 +701,32 @@ class ActionExecutor {
      * Apply final parameter values to avatar
      */
     _applyParameters() {
-        // Start with mood params
-        const finalParams = { ...this.moodParams };
+        // Check if we have anything to apply
+        const hasPersistentOffsets = Object.keys(this.persistentOffsets).length > 0;
+        const shouldApplyMood = this.moodEnforced || this.activeGestures.length > 0;
+
+        // Skip if nothing to apply
+        if (!shouldApplyMood && !hasPersistentOffsets) return;
+
+        // Start with mood params only if needed
+        const finalParams = shouldApplyMood ? { ...this.moodParams } : {};
+
+        // Add persistent offsets (stacked actions like multiple look_right)
+        for (const [key, value] of Object.entries(this.persistentOffsets)) {
+            finalParams[key] = (finalParams[key] || 0) + value;
+        }
 
         // Add gesture offsets
         for (const gesture of this.activeGestures) {
             for (const [key, value] of Object.entries(gesture.currentValues)) {
                 if (gesture.relative) {
-                    // Relative: add to mood value
+                    // Relative: add to mood value (or 0 if no mood base)
                     finalParams[key] = (finalParams[key] || 0) + value;
                 } else {
                     // Absolute: override mood value
                     finalParams[key] = value;
                 }
             }
-        }
-
-        // Debug: log once when params exist
-        if (!this._applyLoggedOnce && Object.keys(finalParams).length > 0) {
-            console.log('[ActionExecutor] _applyParameters finalParams:', Object.keys(finalParams));
-            this._applyLoggedOnce = true;
         }
 
         // Apply parameters (excluding lip sync params)

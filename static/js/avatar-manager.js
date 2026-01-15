@@ -142,12 +142,13 @@ class AvatarManager {
             // Initialize controller
             this.controller = new AvatarController(this.model);
 
-            // Initialize state machine
+            // Initialize state machine (but don't start - ActionExecutor will control avatar)
+            // Call avatarManager.stateMachine.start() manually if you want StateMachine control instead
             this.stateMachine = new AvatarStateMachine(
                 this.controller,
                 this.emotionDetector
             );
-            this.stateMachine.start();
+            // Note: StateMachine is NOT auto-started to avoid conflict with ActionExecutor
 
             // Apply hold+auto mode (disable idle motion, keep physics/breathing/blink)
             this._applyControlMode();
@@ -446,7 +447,7 @@ class AvatarManager {
 
             if (this.audioAnalyzer && this.controller) {
                 const mouthValue = this.audioAnalyzer.getMouthValue();
-                // Scale down lip sync (0.8 = 80% of original)
+                // Scale lip sync (0.8 = 80% mouth opening)
                 this.controller.setMouthOpen(mouthValue * 0.8);
             }
 

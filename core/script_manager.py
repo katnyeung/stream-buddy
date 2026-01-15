@@ -10,8 +10,8 @@ from openai import AsyncOpenAI
 
 
 def strip_action_tags(text: str) -> str:
-    """Remove action tags like [mood:X], [head:Y], [eye:Z] from text."""
-    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+\]', '', text).strip()
+    """Remove action tags like [mood:X], [head:Y], [eye:Z,repeat:2,delay:500] from text."""
+    return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+(?:,[^\]]+)?\]', '', text).strip()
 
 
 def clean_json_response(text: str) -> str:
@@ -347,46 +347,89 @@ NEVER SAY:
     # VTuber avatar action tags - ALWAYS include these
     avatar_instructions = """
 AVATAR ACTIONS: Embed action tags to control the VTuber avatar.
+Actions run in PARALLEL with speech - mood, gestures, and lip sync all happen together!
 
 AVAILABLE TAGS:
 
-MOOD (pick one - facial expression):
+MOOD (pick one at START - sets facial expression for whole response):
 [mood:happy] [mood:excited] [mood:curious] [mood:thinking] [mood:surprised]
 [mood:friendly] [mood:amused] [mood:skeptical] [mood:confident]
 
-HEAD (pick one - these are ANIMATED, they move and return):
+HEAD (animated gestures - SPREAD throughout your response):
 [head:nod] - agreeing, acknowledging
 [head:nod_big] - strong agreement
-[head:shake] - disagreeing, uncertain
+[head:nod,repeat:2,delay:800] - nod twice with 800ms between
+[head:shake] - disagreeing, side-to-side motion (angleX)
 [head:shake_small] - slight disagreement
-[head:tilt] - curious (use sparingly!)
+[head:shake_big] - strong disagreement, emphatic no
+[head:tilt] - curious head tilt (angleZ)
+[head:tilt_left] - tilt head left
+[head:tilt_curious] - curious tilt with raised brows
+[head:ponder] - thinking, head turns slightly away
+[head:confused] - confused tilt with furrowed brows
 
-EYE (pick one - these MOVE and return to center):
-[eye:look_right] - glancing right
-[eye:look_left] - glancing left
-[eye:look_up] - thinking, recalling
+EYE (use SPARINGLY - only 1 in 3 responses):
+[eye:look_up] - thinking, recalling (most natural)
+[eye:look_right] - glancing right (use rarely)
+[eye:look_left] - glancing left (use rarely)
 [eye:roll] - playful skepticism
 [eye:away] - pondering
+NOTE: Don't overuse eye movements! Skip [eye:X] in most responses.
 
-BODY (optional):
-[body:lean] [body:lean_left] [body:lean_right] [body:sway]
+BODY (for emphasis and emotion):
+[body:lean_in] - lean forward, closer to user (engaging)
+[body:lean_back] - lean back (surprised, skeptical)
+[body:lean_left] [body:lean_right] - lean sideways
+[body:shrug] - shrugging motion with raised brows
+[body:sway] - gentle side-to-side movement
+[body:bounce] - excited bouncing motion
+[body:startle] - surprised jump back
 
-ARMS (optional - for emphasis):
-[gesture:present] - presenting a point
-[gesture:think_hand] - thoughtful pose
+ARMS/HANDS (use these to be expressive!):
+[gesture:wave] - friendly wave (greeting, goodbye)
+[gesture:wave_small] - small wave
+[gesture:welcome] - welcoming gesture with wave
+[gesture:present] - presenting a point (one hand)
+[gesture:present_both] - presenting broadly (both hands)
+[gesture:think_hand] - thinking pose, hand near chin
+[gesture:point_up] - making a point, finger raised
+[gesture:emphasize] - emphasizing with hand movement
+[gesture:thumbs_up] - approval, agreement
+[gesture:hands_up] - excitement, celebration
+[gesture:clap] - applause, appreciation
+[gesture:question_hand] - questioning gesture
+[gesture:acknowledge_hand] - acknowledgment hand raise
+[gesture:excited_hands] - excited hands up
 
-EXAMPLES (notice variety - don't always say Yes/Exactly):
-- "[mood:excited] [head:nod] [eye:look_up] That's a key insight! It really shows..."
-- "[mood:curious] [head:tilt] [eye:look_left] Hmm, interesting perspective..."
-- "[mood:amused] [head:shake_small] [eye:roll] Ha! That's one way to put it."
-- "[mood:thinking] [eye:look_up] [head:nod] That connects to what you said earlier..."
-- "[mood:friendly] [head:nod] [eye:look_right] And on that point, it's worth noting..."
+ADVANCED PARAMS (add after gesture name with commas):
+- repeat:N - repeat gesture N times (e.g. [head:nod,repeat:3])
+- delay:N - milliseconds between repeats (e.g. [head:nod,repeat:2,delay:600])
+- intensity:N - strength 0.5-1.5 (e.g. [head:nod,intensity:1.2])
+
+ACTION TIMING - CRITICAL:
+- Put [mood:X] at the START (sets expression for whole response)
+- SPREAD other gestures THROUGHOUT your text (they trigger at that position!)
+- Example: "[mood:happy] Great point! [head:nod] And it shows [eye:look_up] how important..."
+
+EXAMPLES (notice: most have NO eye movement, use body + arm + head for expression):
+- "[mood:excited] [gesture:wave] Hey! That's huge! [body:bounce] [head:nod,repeat:2,delay:500] It really shows how the industry is changing..."
+- "[mood:curious] [body:lean_in] Hmm, [head:tilt_curious] interesting point. [gesture:question_hand] What makes you say that?"
+- "[mood:amused] Ha! [head:shake_small] [body:shrug] That's one way to put it. But seriously..."
+- "[mood:thinking] [gesture:think_hand] [head:ponder] That connects to what you said earlier about..."
+- "[mood:friendly] [gesture:present] And on that point, [head:nod] it's worth noting the impact..."
+- "[mood:excited] [body:bounce] [gesture:thumbs_up] Love it! [head:nod_big] That's exactly right!"
+- "[mood:skeptical] [body:lean_back] [head:shake] I'm not so sure about that. What's the evidence?"
+- "[mood:surprised] [body:startle] Wait, what?! [head:shake] That's unexpected!"
+- "[mood:confident] [body:lean_in] [head:nod] Absolutely. [gesture:point_up] That's the key insight here."
 
 CRITICAL RULES:
-1. Use [head:nod] or [head:shake] MORE than [head:tilt] - nods/shakes are more natural
-2. Eyes should MOVE - use look_right, look_left, look_up, NOT the same one every time
-3. DON'T repeat same combo - vary your mood, head, and eye each response
-4. Keep it simple - 2-3 tags per response is enough"""
+1. Put [mood:X] FIRST, then SPREAD gestures through the sentence
+2. Use [head:nod] or [head:shake] MORE than [head:tilt]
+3. For emphasis use repeat:2 or repeat:3 (e.g. nodding while making a point)
+4. SKIP eye movements most of the time - only use [eye:X] in ~30% of responses
+5. DON'T cluster all tags at start - gestures trigger at their text position!
+6. Use ARM gestures for greetings ([gesture:wave]), presenting ([gesture:present]), excitement ([gesture:thumbs_up])
+7. Use BODY gestures for emotion: [body:lean_in] when engaged, [body:bounce] when excited, [body:shrug] when unsure, [body:startle] when surprised"""
 
     # Build conversation timeline for context (strip action tags to save tokens)
     timeline_context = ""
