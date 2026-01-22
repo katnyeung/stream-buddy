@@ -31,6 +31,14 @@ def should_strip_tags() -> bool:
     return os.getenv("ELEVENLABS_STRIP_TAGS", "true").lower() == "true"
 
 
+# Premium models that support ElevenLabs audio tags
+PREMIUM_MODELS = {
+    "eleven_multilingual_v2",
+    "eleven_v3",
+    "eleven_turbo_v2_5",  # turbo also supports tags
+}
+
+
 def strip_action_tags(text: str) -> str:
     """Remove VTuber action tags - these are for avatar control, not TTS."""
     # Remove VTuber control tags like [mood:X], [gesture:Y], [head:Z,repeat:2,delay:500], etc.
@@ -40,6 +48,11 @@ def strip_action_tags(text: str) -> str:
 def strip_all_tags(text: str) -> str:
     """Remove ALL bracketed tags for models that don't support them."""
     return re.sub(r'\[.*?\]', '', text).strip()
+
+
+def is_premium_model(model_id: str) -> bool:
+    """Check if model supports ElevenLabs audio tags."""
+    return model_id in PREMIUM_MODELS
 
 
 async def text_to_speech(text: str, voice: str = None, model: str = None) -> str:
@@ -64,8 +77,16 @@ async def text_to_speech(text: str, voice: str = None, model: str = None) -> str
     # Log which model is being used
     print(f"[TTS] Using model: {model_id}")
 
-    # Strip VTuber action tags (mood, gesture, head, etc.) - TTS doesn't need them
+    # Always strip VTuber action tags (mood, gesture, head, etc.) - avatar-only control
     clean_text = strip_action_tags(text)
+
+    # For non-premium models, also strip ElevenLabs audio tags
+    # Premium models keep tags like [HAPPY], [EXCITED], [GASP], [SIGH] etc.
+    if not is_premium_model(model_id):
+        clean_text = strip_all_tags(clean_text)
+        print(f"[TTS] Non-premium model - stripped all tags")
+    else:
+        print(f"[TTS] Premium model - keeping ElevenLabs audio tags")
 
     if not clean_text:
         return ""

@@ -4,10 +4,13 @@
  */
 
 // VAD Constants
-const PAUSE_DURATION_FOR_TRANSCRIPTION = 2000;  // 2s pause → transcribe_now
+const DEFAULT_PAUSE_DURATION = 2000;             // Default 2s pause → transcribe_now
 const MAX_SPEECH_DURATION = 30000;               // 30s max speaking → transcribe_now
 const SILENCE_THRESHOLD = 8;                     // RMS threshold
 const VAD_CHECK_INTERVAL = 100;                  // Check every 100ms
+
+// TTS Display TTL (how long to show buddy text after speaking)
+const BUDDY_TEXT_TTL_MS = 5000;                  // 5 seconds
 
 /**
  * AudioQueue - Manages TTS playback queue
@@ -18,6 +21,7 @@ class AudioQueue {
         this.app = app;
         this.queue = [];
         this.isPlaying = false;
+        this.clearTextTimeout = null;  // TTL timeout for buddy text
     }
 
     enqueue(audioBase64, text, actions) {
@@ -33,10 +37,16 @@ class AudioQueue {
             console.log('[AudioQueue] Queue empty, signaling ready');
             this.isPlaying = false;
 
-            // Clear buddy text and deactivate section
-            this.app.buddyText.innerHTML = '';
-            this.app.buddyText.classList.remove('speaking');
-            this.app.buddySection.classList.remove('active');
+            // Clear buddy text after TTL delay
+            if (this.clearTextTimeout) {
+                clearTimeout(this.clearTextTimeout);
+            }
+            this.clearTextTimeout = setTimeout(() => {
+                this.app.buddyText.innerHTML = '';
+                this.app.buddyText.classList.remove('speaking');
+                this.app.buddySection.classList.remove('active');
+                this.clearTextTimeout = null;
+            }, BUDDY_TEXT_TTL_MS);
 
             // Signal server we're ready for more
             if (this.app.ws && this.app.ws.readyState === WebSocket.OPEN) {
@@ -45,6 +55,12 @@ class AudioQueue {
             // Resume VAD
             this.app.resumeVAD();
             return;
+        }
+
+        // Cancel any pending clear if we have more to play
+        if (this.clearTextTimeout) {
+            clearTimeout(this.clearTextTimeout);
+            this.clearTextTimeout = null;
         }
 
         this.isPlaying = true;
@@ -62,7 +78,13 @@ class AudioQueue {
         this.queue = [];
         this.isPlaying = false;
 
-        // Clear buddy text display
+        // Cancel any pending TTL clear
+        if (this.clearTextTimeout) {
+            clearTimeout(this.clearTextTimeout);
+            this.clearTextTimeout = null;
+        }
+
+        // Clear buddy text display immediately on explicit clear
         this.app.buddyText.innerHTML = '';
         this.app.buddyText.classList.remove('speaking');
         this.app.buddySection.classList.remove('active');
@@ -117,9 +139,15 @@ class StreamBuddy {
         this.inputAnalyser = null;
         this.inputAudioContext = null;
         this.lastListeningGesture = 0;  // Track listening animations
+        this.pauseDuration = DEFAULT_PAUSE_DURATION;  // Configurable pause duration
 
         // Audio Queue for TTS playback
         this.audioQueue = new AudioQueue(this);
+
+        // Manual response mode
+        this.autoResponseEnabled = true;
+        this.pendingResponseText = null;  // Store pending response for manual trigger
+        this.periodicInterval = 5;  // Periodic transcription interval in seconds
 
         this.init();
     }
@@ -167,16 +195,92 @@ class StreamBuddy {
         this.timerDisplay = document.getElementById('timer-display');
         this.timerBtn = document.getElementById('timer-btn');
 
+        // Manual response mode elements
+        this.autoResponseCheckbox = document.getElementById('auto-response');
+        this.autoResponseLabel = document.getElementById('auto-response-label');
+        this.periodicIntervalSelect = document.getElementById('periodic-interval');
+
         // Event listeners
         this.startBtn.addEventListener('click', () => this.startSession());
         this.stopBtn.addEventListener('click', () => this.stopSession());
         this.resetBtn.addEventListener('click', () => this.resetSession());
         this.timerBtn.addEventListener('click', () => this.toggleTimer());
 
+        // Auto/Manual response toggle
+        if (this.autoResponseCheckbox) {
+            this.autoResponseCheckbox.addEventListener('change', (e) => {
+                this.autoResponseEnabled = e.target.checked;
+                this.updateAutoResponseUI();
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({
+                        type: 'set_auto_response',
+                        enabled: this.autoResponseEnabled
+                    }));
+                }
+            });
+        }
+
+        // Periodic interval selector
+        if (this.periodicIntervalSelect) {
+            this.periodicIntervalSelect.addEventListener('change', (e) => {
+                this.periodicInterval = parseInt(e.target.value) || 0;
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({
+                        type: 'set_periodic_interval',
+                        seconds: this.periodicInterval
+                    }));
+                }
+            });
+        }
+
+        // Pause duration selector
+        this.pauseDurationSelect = document.getElementById('pause-duration');
+        if (this.pauseDurationSelect) {
+            this.pauseDurationSelect.addEventListener('change', (e) => {
+                this.pauseDuration = parseInt(e.target.value) || DEFAULT_PAUSE_DURATION;
+                console.log('[VAD] Pause duration:', this.pauseDuration + 'ms');
+            });
+        }
+
+        // Hotkey listener for manual response trigger (Space key)
+        document.addEventListener('keydown', (e) => {
+            // Only trigger if Space pressed and we have a pending response
+            // Also check we're not typing in an input/textarea
+            if (e.code === 'Space' &&
+                this.pendingResponseText &&
+                !this.autoResponseEnabled &&
+                !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+                e.preventDefault();
+                this.triggerPendingResponse();
+            }
+        });
+
         console.log('[StreamBuddy] Initialized');
 
         // Initialize avatar (async)
         this.initAvatar();
+    }
+
+    updateAutoResponseUI() {
+        if (this.autoResponseLabel) {
+            this.autoResponseLabel.textContent = this.autoResponseEnabled
+                ? 'Auto (avatar speaks automatically)'
+                : 'Manual (press Space to speak)';
+        }
+    }
+
+    triggerPendingResponse() {
+        if (!this.pendingResponseText || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.log('[StreamBuddy] No pending response to trigger');
+            return;
+        }
+
+        console.log('[StreamBuddy] Triggering pending response via hotkey');
+        this.ws.send(JSON.stringify({ type: 'trigger_response' }));
+
+        // Clear pending state
+        this.pendingResponseText = null;
+        this.buddySection.classList.remove('pending');
     }
 
     async initAvatar() {
@@ -413,6 +517,22 @@ class StreamBuddy {
                 this.setStatus('listening', 'Listening...');
                 this.startRecording();
 
+                // Send initial settings for auto_response and periodic_interval
+                if (this.autoResponseCheckbox) {
+                    this.autoResponseEnabled = this.autoResponseCheckbox.checked;
+                }
+                if (this.periodicIntervalSelect) {
+                    this.periodicInterval = parseInt(this.periodicIntervalSelect.value) || 0;
+                }
+                this.ws.send(JSON.stringify({
+                    type: 'set_auto_response',
+                    enabled: this.autoResponseEnabled
+                }));
+                this.ws.send(JSON.stringify({
+                    type: 'set_periodic_interval',
+                    seconds: this.periodicInterval
+                }));
+
                 // Set avatar to listening state
                 if (this.avatarEnabled && this.avatarManager) {
                     this.avatarManager.setState('listening');
@@ -545,6 +665,46 @@ class StreamBuddy {
                 console.log('[StreamBuddy] Reset complete');
                 this.setStatus('listening', 'Reset complete');
                 break;
+
+            case 'response_pending':
+                // Manual mode: brain has response ready, waiting for hotkey
+                console.log('[StreamBuddy] Response pending (press Space):', msg.text);
+                this.pendingResponseText = msg.text;
+
+                // Show pending indicator
+                this.buddySection.classList.add('pending');
+                this.buddySection.classList.remove('active');
+
+                // Strip action tags for display
+                let pendingDisplayText = msg.text;
+                if (this.actionParser) {
+                    pendingDisplayText = this.actionParser.stripTags(msg.text);
+                }
+
+                this.buddyText.innerHTML = `
+                    <span style="color: #00d4ff;">${pendingDisplayText}</span>
+                    <span class="pending-indicator">Press SPACE</span>
+                    <span class="hotkey-hint">Response ready - press Space to speak</span>
+                `;
+                this.setStatus('thinking', 'Response ready (Space to speak)');
+                break;
+
+            case 'auto_response_changed':
+                console.log('[StreamBuddy] Auto response changed:', msg.enabled);
+                this.autoResponseEnabled = msg.enabled;
+                if (this.autoResponseCheckbox) {
+                    this.autoResponseCheckbox.checked = msg.enabled;
+                }
+                this.updateAutoResponseUI();
+                break;
+
+            case 'periodic_interval_changed':
+                console.log('[StreamBuddy] Periodic interval changed:', msg.seconds);
+                this.periodicInterval = msg.seconds;
+                if (this.periodicIntervalSelect) {
+                    this.periodicIntervalSelect.value = msg.seconds.toString();
+                }
+                break;
         }
     }
 
@@ -605,10 +765,10 @@ class StreamBuddy {
                 stateClass = 'current';
             }
 
-            // Get key points (max 2)
+            // Get key points (max 2) - handle both dict and string format
             const keyPoints = (section.key_points || []).slice(0, 2);
             const keyPointsHtml = keyPoints.length > 0
-                ? `<div class="section-points">${keyPoints.map(p => `<span>• ${p}</span>`).join('')}</div>`
+                ? `<div class="section-points">${keyPoints.map(p => `<span>• ${typeof p === 'object' ? p.text : p}</span>`).join('')}</div>`
                 : '';
 
             return `
@@ -820,7 +980,7 @@ class StreamBuddy {
         } else {
             // Silent - check for pause
             const silenceDuration = now - this.lastSpeechTime;
-            if (silenceDuration >= PAUSE_DURATION_FOR_TRANSCRIPTION && this.lastSpeechTime > 0 && this.speechStartTime > 0) {
+            if (silenceDuration >= this.pauseDuration && this.lastSpeechTime > 0 && this.speechStartTime > 0) {
                 console.log('[VAD] Pause detected after', silenceDuration, 'ms silence');
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     this.ws.send(JSON.stringify({ type: 'transcribe_now' }));

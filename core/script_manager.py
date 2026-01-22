@@ -103,13 +103,36 @@ Return a JSON object with this structure:
         {{
             "id": 1,
             "title": "section title",
-            "key_points": ["point 1", "point 2"],
+            "key_points": [
+                {{
+                    "text": "point description",
+                    "type": "speech|action",
+                    "keywords": ["keyword1", "keyword2"],
+                    "action_trigger": "gesture:wave" (only if type is action)
+                }}
+            ],
             "suggested_phrases": ["how to start this section"],
             "duration_secs": number (seconds for this section)
         }}
     ],
     "total_sections": number
 }}
+
+KEY POINT TYPES:
+- "speech": Something the speaker would SAY. Extract 2-4 important keywords from the text.
+  Example: {{"text": "Introduce yourself", "type": "speech", "keywords": ["introduce", "yourself", "name"]}}
+- "action": Something the AI avatar should DO. Include action_trigger.
+  Example: {{"text": "Trigger wave greeting", "type": "action", "keywords": ["wave", "greeting"], "action_trigger": "gesture:wave"}}
+
+ACTION TRIGGERS (for type: "action"):
+- "gesture:wave" - wave hand
+- "gesture:nod" - nod head
+- "gesture:think" - thinking pose
+- "body:bounce" - excited bounce
+- "head:tilt" - curious tilt
+- "emotion:happy" - happy expression
+- "emotion:curious" - curious expression
+- "emotion:excited" - excited expression
 
 IMPORTANT for target_duration_mins:
 1. If sections have time hints like "(30-40 sec)", "(1-2 min)", add them up to calculate total
@@ -207,13 +230,22 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
     section_titles = []
     script_summary = []
     total_sections = len(structure.get("sections", []))
+    print(f"[Brain] Script title: {structure.get('title', 'NO TITLE')}, sections: {total_sections}")
     for i, s in enumerate(structure.get("sections", [])):
         section_titles.append(s['title'])
         points = s.get("key_points", [])[:4]  # Show more points for matching
         covered_mark = "✓" if (i+1) in sections_done else "○"
-        # Add keywords to help matching
-        keywords = ", ".join(points) if points else s['title']
+        # Add keywords to help matching - handle both dict and string format
+        keywords_list = []
+        for p in points:
+            if isinstance(p, dict):
+                keywords_list.extend(p.get("keywords", []))
+            else:
+                keywords_list.append(p)
+        keywords = ", ".join(keywords_list) if keywords_list else s['title']
         script_summary.append(f"[{i+1}] {covered_mark} {s['title']}\n    Keywords: {keywords}")
+        if i == 0:  # Log first section as sample
+            print(f"[Brain] First section: {s['title']}, points: {points[:2]}")
 
     # Build buddy history string - make it prominent
     buddy_said = ""
@@ -221,7 +253,7 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
         buddy_said = f"""
 
 ⚠️ YOUR PREVIOUS RESPONSES (DO NOT REPEAT):
-{chr(10).join(f'- "{h[:100]}..."' for h in buddy_history[-4:])}
+{chr(10).join(f'- "{h[:100]}..."' for h in buddy_history)}
 
 CRITICAL: Say something DIFFERENT each time. Don't repeat the same facts or phrases."""
 
@@ -247,13 +279,20 @@ STYLE: AGGRESSIVE - Jump in often! React to names, companies, products, numbers.
 STYLE: PASSIVE - Only respond when asked directly."""
     else:  # balanced
         style_instructions = """
-STYLE: BALANCED - Supportive co-host who enriches the CURRENT topic.
-- FOCUS ON CURRENT SECTION: Add value to what speaker is CURRENTLY discussing
-- ENRICH, DON'T PREDICT: Add interesting context to their current point, don't jump ahead
-- DON'T OUTSMART: You're a co-host, not a teacher - support their flow, don't take over
-- WAIT FOR COMPLETION: Only suggest next section when speaker has covered most of current section
-- Be selective: Jump in ~60% of opportunities, WAIT 40%
-- DON'T correct pronunciation or repeat what they said"""
+STYLE: BALANCED - Engage consistently! Default is to RESPOND, not wait.
+
+YOU SHOULD RESPOND (this is your default):
+- If transcript has 5+ words of real content → RESPOND
+- If speaker mentions any topic from the script → RESPOND
+- If speaker seems to be making a point → RESPOND
+- If it's been a while since you spoke → RESPOND
+
+ONLY WAIT if:
+- Transcript is CLEARLY just noise/errors (random words that make no sense)
+- Transcript is ONLY filler words ("um", "so", "okay", "uh")
+- Less than 4 words total
+
+IMPORTANT: When in doubt, RESPOND with something supportive. It's better to engage than stay silent."""
 
     # Personality-specific instructions
     personality_instructions = ""
@@ -332,12 +371,31 @@ USE EMOTIONAL EXPRESSIONS:
 - Enthusiasm: "Yes!", "Exactly!", "Love it!", "That's it!"
 - Use "..." for pauses, "—" for dramatic interruption
 
-EXAMPLE EXPRESSIVE OUTPUTS:
-- "Wow! Two billion dollars? That's actually less than Instagram cost them!"
-- "Wait, wait— hold on. $40 billion on AI last year alone?"
-- "Hmm... I'm not sure about that. Don't they need their own model?"
-- "Oh! That's actually impressive for a startup!"
-- "Ha! OK that's pretty funny when you put it that way."
+🎤 ELEVENLABS VOICE EMOTION TAGS (Premium TTS Feature):
+Use these tags to control HOW the voice sounds - place alongside [mood:X] tags!
+
+EMOTION TAGS (pick ONE at start, matching your [mood:]):
+[HAPPY] [EXCITED] [CURIOUS] [THOUGHTFUL] [SURPRISED] [SAD] [SKEPTICAL] [CONFIDENT]
+[CALM] [ANXIOUS] [GENTLE] [PASSIONATE] [ANNOYED] [EMBARRASSED]
+
+NON-VERBAL SOUNDS (use sparingly for realism):
+[GASP] [SIGH] [CHUCKLE] [LAUGH] [HMM] [GIGGLE]
+
+PACING/DELIVERY:
+[WHISPERING] [SOFT] [LOUD] [FAST] [SLOW] [DRAMATIC PAUSE]
+
+COMBO EXAMPLE - Avatar + Voice emotion together:
+"[mood:happy] [HAPPY] Great point! [head:nod] And it shows..."
+"[mood:excited] [EXCITED] Wow! [GASP] [body:bounce] That's incredible!"
+"[mood:thinking] [THOUGHTFUL] [HMM] [gesture:think_hand] Let me think about that..."
+"[mood:amused] [CHUCKLE] Ha! [head:shake_small] That's one way to put it."
+"[mood:surprised] [SURPRISED] [GASP] Wait what?! [body:startle] No way!"
+
+RULES FOR VOICE TAGS:
+1. Put voice emotion tag [HAPPY] right after [mood:happy] at the START
+2. Use [GASP], [SIGH], [CHUCKLE] INLINE where they should sound
+3. Match voice tag to mood tag (e.g. [mood:excited] [EXCITED])
+4. Don't overuse non-verbal sounds - max 1-2 per response
 
 NEVER SAY:
 - "You know what? That's similar to..."
@@ -431,19 +489,45 @@ CRITICAL RULES:
 6. Use ARM gestures for greetings ([gesture:wave]), presenting ([gesture:present]), excitement ([gesture:thumbs_up])
 7. Use BODY gestures for emotion: [body:lean_in] when engaged, [body:bounce] when excited, [body:shrug] when unsure, [body:startle] when surprised"""
 
-    # Build conversation timeline for context (strip action tags to save tokens)
+    # Build conversation timeline with RELATIVE timestamps (NOW = 00:00, past = negative)
     timeline_context = ""
     if timeline:
+        def parse_timestamp(ts: str) -> int:
+            """Parse MM:SS to total seconds"""
+            try:
+                parts = ts.split(":")
+                return int(parts[0]) * 60 + int(parts[1])
+            except:
+                return 0
+
+        def format_relative_time(seconds_ago: int) -> str:
+            """Format as -MM:SS for past events"""
+            mins = seconds_ago // 60
+            secs = seconds_ago % 60
+            return f"-{mins:02d}:{secs:02d}"
+
+        # Get current time from elapsed_mins
+        now_seconds = int(elapsed_mins * 60)
+
         def clean_timeline_entry(entry):
             text = entry['text']
-            # Strip action tags from buddy responses
             if entry['speaker'].lower() == 'buddy':
                 text = strip_action_tags(text)
-            return f"{entry['time']} {entry['speaker']}: {text[:100]}..."
+            speaker_icon = "🎤" if entry['speaker'].lower() == 'user' else "🤖"
 
-        timeline_lines = [clean_timeline_entry(entry) for entry in timeline[-8:]]
+            # Calculate relative time (how long ago)
+            entry_seconds = parse_timestamp(entry['time'])
+            seconds_ago = now_seconds - entry_seconds
+            rel_time = format_relative_time(seconds_ago) if seconds_ago > 0 else "00:00"
+
+            return f"[{rel_time}] {speaker_icon} {entry['speaker']}: {text[:60]}..."
+
+        # Show last 3 entries (limited to prevent LLM confusion in later sections)
+        recent_entries = timeline[-3:]
+        timeline_lines = [clean_timeline_entry(entry) for entry in recent_entries]
+
         timeline_context = f"""
-CONVERSATION TIMELINE:
+📜 CONVERSATION HISTORY (relative to NOW):
 {chr(10).join(timeline_lines)}
 """
 
@@ -486,11 +570,10 @@ CONVERSATION TIMELINE:
 
     timing_context = f"""
 ⏱️ TIME: {elapsed_mins:.1f} / {target_mins} min ({time_pct:.0f}% elapsed)
-📊 COVERAGE: {len(sections_done)} / {total_sections} sections (currently on section {current_max_section})
+📊 PROGRESS: {len(sections_done)} / {total_sections} sections covered
 📈 PACING: {pacing_hint}
-🎯 NEXT SECTION: [{next_section_num}] {next_section_title}
+📋 NEXT SECTION (for reference): [{next_section_num}] "{next_section_title}"
 {transition_urgency}
-{transition_hint}
 """
 
     # Extract key terms from script for STT correction guidance
@@ -500,11 +583,18 @@ CONVERSATION TIMELINE:
         for word in section.get("title", "").split():
             if len(word) > 3:
                 key_terms.add(word)
-        # Add key points words
+        # Add key points words - handle both dict and string format
         for point in section.get("key_points", []):
-            for word in point.split():
-                if len(word) > 4:
-                    key_terms.add(word)
+            if isinstance(point, dict):
+                text = point.get("text", "")
+                for word in text.split():
+                    if len(word) > 4:
+                        key_terms.add(word)
+                key_terms.update(point.get("keywords", []))
+            else:
+                for word in point.split():
+                    if len(word) > 4:
+                        key_terms.add(word)
 
     # Build STT correction guide with tolerance for non-native speakers
     stt_guide = f"""
@@ -530,41 +620,52 @@ STREAM OUTLINE (✓=covered, ○=remaining):
 {timeline_context}
 {buddy_said}
 
->>> SPEAKER JUST SAID (respond to THIS): "{transcript}"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎤 [00:00] NOW SPEAKING:
+"{transcript}"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SECTION DETECTION - CRITICAL:
-1. Match the speaker's words to the section KEYWORDS above
-2. If they mention topics from section 3, they've covered sections 1-3
-3. Return ALL section numbers the speaker has touched so far
-4. Don't assume they're still on section 1 - listen to what they're ACTUALLY saying
+YOUR DECISION - Pick ONE:
 
-RULES:
-1. Listen to what speaker is CURRENTLY talking about
-2. ENRICH their current point - add interesting facts about THEIR topic
-3. DON'T jump ahead to next sections until they've covered most of current
-4. DON'T correct pronunciation or repeat what they said
-5. Be a supportive co-host - help them shine, don't outsmart them
+1. RESPOND - Speaker said something meaningful:
+   - Add a SHORT supportive comment about what they're discussing (1-2 sentences)
+   - React to their CURRENT point, don't rush them
+   - Only suggest next section if they EXPLICITLY say they're done or ask what's next
 
-WHEN TO SPEAK (with VALUE):
-- Speaker makes an interesting point → add context about THAT point
-- Speaker pauses → encourage or add to their current topic
-- Speaker has covered most of current section → THEN suggest moving on
+2. WAIT - ONLY if transcript is pure noise (random words, just filler)
 
-WHEN TO WAIT:
-- Speaker is still developing their current point
-- You JUST spoke
-- You would be jumping ahead of where they are
+RESPONSE BALANCE:
+- 80% of responses: Support/react to their CURRENT topic
+- 20% of responses: Gently guide to next section (only when they pause or seem done)
+- NEVER rush them - let them finish their thoughts
+- DON'T always say "let's move to..." - that's annoying
+
+GOOD EXAMPLES:
+- "That's a great point about the latency!" (support current topic)
+- "The VTuber emotions really add to the experience!" (react to what they said)
+- "Interesting how that connects to the backend!" (add context)
+
+BAD EXAMPLES (avoid these):
+- "Let's move on to the next section!" (too pushy)
+- "Great, now let's talk about..." (rushing)
+- "Time to cover the closing!" (annoying)
 
 JSON: {{"action": "respond|enrich|wait", "speak_text": "[mood:X] [gesture:Y] your response with action tags embedded", "sections_covered": [all section numbers touched], "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}
 
 IMPORTANT: speak_text MUST include [mood:X] at the start and [gesture:Y] tags at natural points!
 Example: "[mood:friendly] [head:nod] That's a great point - it really highlights how..." """
 
+    # Log what's being sent to the brain
+    print(f"[Brain] Analyzing transcript: '{transcript[:100]}...'")
+    print(f"[Brain] Script outline ({len(script_summary)} sections): {section_titles}")
+    if script_summary:
+        print(f"[Brain] First section detail: {script_summary[0][:150]}...")
+
     try:
         response = await grok.chat.completions.create(
-            model="grok-2-1212",  # Grok 2 - longer context, better reasoning
+            model="grok-3-mini",  # Grok 3 Mini - fast responses for real-time co-host
             messages=[
-                {"role": "system", "content": "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) Match speaker's words to section KEYWORDS. 2) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text to animate your avatar. 3) Respond with valid JSON."},
+                {"role": "system", "content": "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) ONLY discuss topics from the STREAM OUTLINE - never invent random facts. 2) Use the script sections to interpret unclear STT. 3) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text. 4) Respond with valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
@@ -647,16 +748,17 @@ Example: "[mood:friendly] [head:nod] That's a great point - it really highlights
             else:
                 # Store clean text (no action tags) to reduce tokens in LLM context
                 state["buddy_history"].append(speak_clean)
-                # Keep only last 10
-                if len(state["buddy_history"]) > 10:
-                    state["buddy_history"] = state["buddy_history"][-10:]
+                # Keep only last 4 (aligned with what LLM sees in prompt)
+                if len(state["buddy_history"]) > 4:
+                    state["buddy_history"] = state["buddy_history"][-4:]
                 # Enter conversation mode
                 state["in_conversation"] = True
 
                 # Track responses per section
                 if "section_response_count" not in state:
                     state["section_response_count"] = {}
-                current_sec = str(max(result.get("sections_covered", [1])))
+                sections_covered = result.get("sections_covered", [1]) or [1]  # Fallback if empty
+                current_sec = str(max(sections_covered))
                 state["section_response_count"][current_sec] = state["section_response_count"].get(current_sec, 0) + 1
         else:
             # Exit conversation mode when waiting or reminding
@@ -690,6 +792,7 @@ async def get_current_prompt(session_id: str) -> str:
     if section.get("suggested_phrases"):
         return section["suggested_phrases"][0]
     elif section.get("key_points"):
-        return section["key_points"][0]
+        point = section["key_points"][0]
+        return point.get("text", str(point)) if isinstance(point, dict) else point
 
     return section.get("title", "")

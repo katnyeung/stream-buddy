@@ -36,7 +36,11 @@ router = APIRouter()
 
 # Timing configs
 MIN_AUDIO_BYTES = 50000  # Minimum audio to transcribe (~5s of speech)
-MIN_WORDS_FOR_BRAIN = 20  # Minimum words before asking brain
+MIN_WORDS_FOR_BRAIN = 5  # Minimum words to filter noise (pause-based trigger)
+BRAIN_CALL_COOLDOWN = 0  # Disabled - frontend VAD already gates with pause detection
+
+# Periodic transcription (transcribe even without pause, for faster feedback)
+DEFAULT_PERIODIC_TRANSCRIBE_SECONDS = 5  # Transcribe every 5s of audio (0 = disabled, only VAD)
 
 # Cooldowns by style (set dynamically)
 COOLDOWNS = {
@@ -86,6 +90,16 @@ async def websocket_stream(websocket: WebSocket):
     target_duration_mins = 10  # Default target duration in minutes
     all_sections_covered = set()  # Track all sections covered so far
     conversation_timeline = []  # Track timestamped conversation: [{"time": "00:30", "speaker": "User", "text": "..."}]
+    last_brain_call_time = 0  # Track last brain call for cooldown
+    accumulated_transcript = ""  # Accumulate transcript between brain calls
+
+    # Periodic transcription settings
+    periodic_transcribe_seconds = DEFAULT_PERIODIC_TRANSCRIBE_SECONDS
+    last_periodic_transcribe_time = 0  # Track last periodic transcription
+
+    # Manual response mode (hotkey to trigger avatar speech)
+    auto_response_enabled = True  # True = auto respond, False = wait for hotkey
+    pending_response = None  # Store prepared response waiting for hotkey
 
     # Send ready
     await websocket.send_json({
@@ -104,6 +118,55 @@ async def websocket_stream(websocket: WebSocket):
                 if "bytes" in data:
                     # Audio chunk received
                     audio_buffer.append(data["bytes"])
+
+                    # Check for periodic transcription (runs even while receiving audio)
+                    if (script_loaded and
+                        not is_speaking and
+                        periodic_transcribe_seconds > 0 and
+                        audio_buffer.total_bytes >= MIN_AUDIO_BYTES):
+
+                        now = time.time()
+                        time_since_last = now - last_periodic_transcribe_time
+
+                        if time_since_last >= periodic_transcribe_seconds:
+                            logger.info(f"[{session_id}] Periodic transcribe ({audio_buffer.total_bytes} bytes, {time_since_last:.1f}s)")
+                            last_periodic_transcribe_time = now
+
+                            filepath = await audio_buffer.save_to_temp_file()
+                            if filepath:
+                                transcript = await transcribe_audio(filepath, whisper_context)
+
+                                # Skip hallucinations (just punctuation or very short)
+                                clean_transcript = transcript.strip() if transcript else ""
+                                is_hallucination = len(clean_transcript) < 3 or clean_transcript.replace(".", "").replace(",", "").strip() == ""
+
+                                if transcript and not is_hallucination:
+                                    # Accumulate transcript
+                                    accumulated_transcript += " " + transcript
+                                    accumulated_transcript = accumulated_transcript.strip()
+
+                                    # Add to timeline
+                                    if session_start_time:
+                                        elapsed_secs = now - session_start_time
+                                        conversation_timeline.append({
+                                            "time": format_timestamp(elapsed_secs),
+                                            "speaker": "User",
+                                            "text": transcript
+                                        })
+                                        if len(conversation_timeline) > 10:
+                                            conversation_timeline.pop(0)
+
+                                    # Send transcript to frontend (live feedback)
+                                    await websocket.send_json({
+                                        "type": "transcript",
+                                        "text": transcript,
+                                        "is_partial": True
+                                    })
+
+                                    logger.info(f"[{session_id}] Periodic STT: '{transcript[:40]}...' (accumulated: {len(accumulated_transcript.split())} words)")
+
+                                # Clear buffer after periodic transcription to avoid duplicate with VAD
+                                audio_buffer.clear_accumulator()
 
                 elif "text" in data:
                     msg = json.loads(data["text"])
@@ -184,7 +247,73 @@ async def websocket_stream(websocket: WebSocket):
                         last_prompt = ""
                         last_remind_time = 0
                         last_enrich_time = 0
+                        pending_response = None
                         await websocket.send_json({"type": "reset_complete"})
+
+                    elif msg_type == "set_auto_response":
+                        # Toggle auto/manual response mode
+                        auto_response_enabled = msg.get("enabled", True)
+                        logger.info(f"[{session_id}] Auto response: {auto_response_enabled}")
+                        await websocket.send_json({
+                            "type": "auto_response_changed",
+                            "enabled": auto_response_enabled
+                        })
+
+                    elif msg_type == "set_periodic_interval":
+                        # Set periodic transcription interval (0 = disabled)
+                        periodic_transcribe_seconds = msg.get("seconds", DEFAULT_PERIODIC_TRANSCRIBE_SECONDS)
+                        logger.info(f"[{session_id}] Periodic transcribe interval: {periodic_transcribe_seconds}s")
+                        await websocket.send_json({
+                            "type": "periodic_interval_changed",
+                            "seconds": periodic_transcribe_seconds
+                        })
+
+                    elif msg_type == "trigger_response":
+                        # Manual hotkey pressed - speak the pending response
+                        if pending_response:
+                            logger.info(f"[{session_id}] Manual trigger - speaking pending response")
+                            is_speaking = True
+                            speak_text = pending_response["speak_text"]
+                            result = pending_response["result"]
+
+                            # Add to timeline
+                            now = time.time()
+                            elapsed_secs = now - session_start_time if session_start_time else 0
+                            conversation_timeline.append({
+                                "time": format_timestamp(elapsed_secs),
+                                "speaker": "Buddy",
+                                "text": speak_text
+                            })
+                            if len(conversation_timeline) > 10:
+                                conversation_timeline.pop(0)
+
+                            audio_buffer.clear_all()
+
+                            # Send speaking notification
+                            await websocket.send_json({
+                                "type": "cohost_speaking",
+                                "text": speak_text,
+                                "reason": result.get("reason", "manual trigger")
+                            })
+
+                            # Split into sentences and queue TTS
+                            sentences = split_into_sentences(speak_text)
+                            logger.info(f"[{session_id}] Splitting into {len(sentences)} sentences")
+
+                            for i, sentence in enumerate(sentences):
+                                tts_start = time.time()
+                                audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
+                                logger.info(f"[{session_id}] TTS sentence {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
+
+                                await websocket.send_json({
+                                    "type": "cohost_audio_queued",
+                                    "text": sentence,
+                                    "audio_base64": audio_base64
+                                })
+
+                            pending_response = None
+                        else:
+                            logger.info(f"[{session_id}] Manual trigger - no pending response")
 
                     elif msg_type == "transcribe_now":
                         # Frontend VAD detected 2s pause - transcribe and process
@@ -202,14 +331,18 @@ async def websocket_stream(websocket: WebSocket):
                         if filepath:
                             transcript = await transcribe_audio(filepath, whisper_context)
                             stt_time = time.time() - start
+                            now = time.time()
 
-                            if transcript:
+                            # Skip hallucinations (just punctuation or very short)
+                            clean_transcript = transcript.strip() if transcript else ""
+                            is_hallucination = len(clean_transcript) < 3 or clean_transcript.replace(".", "").replace(",", "").strip() == ""
+
+                            # Only accumulate and display non-hallucination transcripts
+                            if transcript and not is_hallucination:
                                 full_transcript += " " + transcript
                                 full_transcript = full_transcript.strip()
-                                word_count = len(full_transcript.split())
 
                                 # Add to timeline
-                                now = time.time()
                                 if session_start_time:
                                     elapsed_secs = now - session_start_time
                                     conversation_timeline.append({
@@ -228,111 +361,147 @@ async def websocket_stream(websocket: WebSocket):
                                     "text": transcript
                                 })
 
-                                # Ask brain if we have enough content
-                                if word_count >= MIN_WORDS_FOR_BRAIN:
-                                    brain_start = time.time()
-                                    elapsed_mins = 0
-                                    if session_start_time:
-                                        elapsed_mins = (now - session_start_time) / 60
+                                # Accumulate transcript between brain calls
+                                accumulated_transcript += " " + transcript
+                                accumulated_transcript = accumulated_transcript.strip()
 
-                                    supports_emotions = selected_tts_model == "eleven_multilingual_v2"
+                            # Check brain trigger (even if this transcript was hallucination - periodic may have accumulated words)
+                            accumulated_word_count = len(accumulated_transcript.split()) if accumulated_transcript else 0
 
-                                    result = await analyze_progress(
-                                        session_id,
-                                        transcript,
-                                        selected_style,
-                                        selected_personality,
-                                        supports_emotions,
-                                        elapsed_mins=elapsed_mins,
-                                        target_mins=target_duration_mins,
-                                        sections_done=list(all_sections_covered),
-                                        timeline=conversation_timeline
-                                    )
-                                    brain_time = time.time() - brain_start
+                            # Check brain cooldown
+                            time_since_brain = now - last_brain_call_time
+                            if time_since_brain < BRAIN_CALL_COOLDOWN:
+                                logger.info(f"[{session_id}] Brain skipped (cooldown: {time_since_brain:.1f}s < {BRAIN_CALL_COOLDOWN}s)")
+                                continue
 
-                                    action = result.get("action", "wait")
-                                    sections_covered = result.get("sections_covered", [])
+                            # Pause-based trigger: enough words to filter noise
+                            if accumulated_word_count < MIN_WORDS_FOR_BRAIN:
+                                logger.info(f"[{session_id}] Skipping brain: only {accumulated_word_count} words (min: {MIN_WORDS_FOR_BRAIN})")
+                                continue
 
-                                    # Track sections
-                                    for sec in sections_covered:
-                                        all_sections_covered.add(sec)
+                            # Ready to call brain (pause detected + enough words)
+                            transcript_to_analyze = accumulated_transcript
+                            accumulated_transcript = ""  # Reset accumulator
+                            last_brain_call_time = now
 
-                                    state = await get_session_state(session_id) or {}
-                                    state["all_sections_covered"] = list(all_sections_covered)
-                                    await store_session_state(session_id, state)
+                            brain_start = time.time()
+                            elapsed_mins = 0
+                            if session_start_time:
+                                elapsed_mins = (now - session_start_time) / 60
 
-                                    logger.info(f"[{session_id}] VAD Brain in {brain_time:.2f}s: action={action}")
+                            supports_emotions = selected_tts_model == "eleven_multilingual_v2"
 
-                                    # Send sections progress
+                            logger.info(f"[{session_id}] Brain triggered (pause, {accumulated_word_count} words)")
+
+                            result = await analyze_progress(
+                                session_id,
+                                transcript_to_analyze,
+                                selected_style,
+                                selected_personality,
+                                supports_emotions,
+                                elapsed_mins=elapsed_mins,
+                                target_mins=target_duration_mins,
+                                sections_done=list(all_sections_covered),
+                                timeline=conversation_timeline
+                            )
+                            brain_time = time.time() - brain_start
+
+                            action = result.get("action", "wait")
+                            sections_covered = result.get("sections_covered", [])
+
+                            # Track sections
+                            for sec in sections_covered:
+                                all_sections_covered.add(sec)
+
+                            state = await get_session_state(session_id) or {}
+                            state["all_sections_covered"] = list(all_sections_covered)
+                            await store_session_state(session_id, state)
+
+                            logger.info(f"[{session_id}] VAD Brain in {brain_time:.2f}s: action={action}")
+
+                            # Send sections progress
+                            await websocket.send_json({
+                                "type": "sections_progress",
+                                "sections_covered": list(all_sections_covered),
+                                "elapsed_mins": round(elapsed_mins, 1),
+                                "target_mins": target_duration_mins,
+                                "pacing_hint": result.get("pacing_hint", "")
+                            })
+
+                            # Handle respond/enrich with queued TTS
+                            if action in ("respond", "enrich"):
+                                speak_text = result.get("speak_text", "")
+                                if speak_text:
+                                    logger.info(f"[{session_id}] VAD {action}: '{speak_text[:60]}...'")
+
+                                    if auto_response_enabled:
+                                        # Auto mode: speak immediately
+                                        is_speaking = True
+
+                                        # Add to timeline
+                                        elapsed_secs = now - session_start_time if session_start_time else 0
+                                        conversation_timeline.append({
+                                            "time": format_timestamp(elapsed_secs),
+                                            "speaker": "Buddy",
+                                            "text": speak_text
+                                        })
+                                        if len(conversation_timeline) > 10:
+                                            conversation_timeline.pop(0)
+
+                                        audio_buffer.clear_all()
+
+                                        # Send speaking notification
+                                        await websocket.send_json({
+                                            "type": "cohost_speaking",
+                                            "text": speak_text,
+                                            "reason": result.get("reason", "")
+                                        })
+
+                                        # Split into sentences and queue TTS
+                                        sentences = split_into_sentences(speak_text)
+                                        logger.info(f"[{session_id}] Splitting into {len(sentences)} sentences")
+
+                                        for i, sentence in enumerate(sentences):
+                                            tts_start = time.time()
+                                            audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
+                                            logger.info(f"[{session_id}] TTS sentence {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
+
+                                            # Send queued audio chunk
+                                            await websocket.send_json({
+                                                "type": "cohost_audio_queued",
+                                                "text": sentence,
+                                                "audio_base64": audio_base64
+                                            })
+                                    else:
+                                        # Manual mode: store response, wait for hotkey
+                                        pending_response = {
+                                            "speak_text": speak_text,
+                                            "result": result
+                                        }
+                                        logger.info(f"[{session_id}] Manual mode - response pending (press hotkey)")
+
+                                        # Notify frontend that response is ready
+                                        await websocket.send_json({
+                                            "type": "response_pending",
+                                            "text": speak_text,
+                                            "reason": result.get("reason", "")
+                                        })
+
+                            elif action == "remind":
+                                prompt_text = result.get("prompt_text", "")
+                                if prompt_text and prompt_text != last_prompt:
+                                    last_prompt = prompt_text
+                                    last_remind_time = now
                                     await websocket.send_json({
-                                        "type": "sections_progress",
-                                        "sections_covered": list(all_sections_covered),
-                                        "elapsed_mins": round(elapsed_mins, 1),
-                                        "target_mins": target_duration_mins,
-                                        "pacing_hint": result.get("pacing_hint", "")
+                                        "type": "show_prompt",
+                                        "text": prompt_text
                                     })
-
-                                    # Handle respond/enrich with queued TTS
-                                    if action in ("respond", "enrich"):
-                                        speak_text = result.get("speak_text", "")
-                                        if speak_text:
-                                            is_speaking = True
-
-                                            # Add to timeline
-                                            elapsed_secs = now - session_start_time if session_start_time else 0
-                                            conversation_timeline.append({
-                                                "time": format_timestamp(elapsed_secs),
-                                                "speaker": "Buddy",
-                                                "text": speak_text
-                                            })
-                                            if len(conversation_timeline) > 10:
-                                                conversation_timeline.pop(0)
-
-                                            logger.info(f"[{session_id}] VAD {action}: '{speak_text[:60]}...'")
-
-                                            audio_buffer.clear_all()
-
-                                            # Send speaking notification
-                                            await websocket.send_json({
-                                                "type": "cohost_speaking",
-                                                "text": speak_text,
-                                                "reason": result.get("reason", "")
-                                            })
-
-                                            # Split into sentences and queue TTS
-                                            sentences = split_into_sentences(speak_text)
-                                            logger.info(f"[{session_id}] Splitting into {len(sentences)} sentences")
-
-                                            for i, sentence in enumerate(sentences):
-                                                tts_start = time.time()
-                                                audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
-                                                logger.info(f"[{session_id}] TTS sentence {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
-
-                                                # Send queued audio chunk
-                                                await websocket.send_json({
-                                                    "type": "cohost_audio_queued",
-                                                    "text": sentence,
-                                                    "audio_base64": audio_base64
-                                                })
-
-                                    elif action == "remind":
-                                        prompt_text = result.get("prompt_text", "")
-                                        if prompt_text and prompt_text != last_prompt:
-                                            last_prompt = prompt_text
-                                            last_remind_time = now
-                                            await websocket.send_json({
-                                                "type": "show_prompt",
-                                                "text": prompt_text
-                                            })
 
                         audio_buffer.clear_accumulator()
 
             except asyncio.TimeoutError:
-                # Timeout - check if we should transcribe
+                # Timeout - periodic check now handled in audio chunk handler
                 pass
-
-            # All transcription is now triggered by VAD (transcribe_now message)
-            # No periodic transcription - wait for user to pause
 
     except WebSocketDisconnect:
         logger.info(f"[{session_id}] Client disconnected")

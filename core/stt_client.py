@@ -163,8 +163,8 @@ async def transcribe_audio(filepath: str, context_prompt: str = "") -> str:
         return ""
 
     file_size = os.path.getsize(filepath)
-    if file_size < 1024:  # Skip files less than 1KB
-        logger.warning(f"[STT] File too small: {file_size} bytes")
+    if file_size < 10000:  # Skip files less than 10KB (Whisper needs ~0.5s of audio minimum)
+        logger.debug(f"[STT] File too small: {file_size} bytes, skipping")
         return ""
 
     logger.info(f"[STT] Transcribing {file_size} bytes...")
