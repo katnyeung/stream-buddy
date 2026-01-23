@@ -47,6 +47,14 @@ app = FastAPI(
 from api.websocket import router as ws_router
 app.include_router(ws_router)
 
+# Import and include VTuber avatar WebSocket router
+try:
+    from vtuber_engine.websocket_handler import router as vtuber_ws_router
+    app.include_router(vtuber_ws_router, tags=["vtuber"])
+    logger.info("VTuber engine WebSocket router loaded")
+except ImportError as e:
+    logger.warning(f"VTuber engine not available: {e}")
+
 # Serve static files
 static_path = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_path), name="static")

@@ -348,6 +348,44 @@ const ACTION_LIBRARY = {
             relative: true
         },
 
+        // === HEAD TURNS (big angleZ movement -30 to 30) ===
+        head_turn_left: {
+            keyframes: [
+                { t: 0.0, angleZ: 0, angleX: 0 },
+                { t: 0.3, angleZ: 25, angleX: -5 },
+                { t: 0.6, angleZ: 30, angleX: -8 },
+                { t: 0.8, angleZ: 20, angleX: -3 },
+                { t: 1.0, angleZ: 0, angleX: 0 }
+            ],
+            duration: 2500,
+            relative: true
+        },
+
+        head_turn_right: {
+            keyframes: [
+                { t: 0.0, angleZ: 0, angleX: 0 },
+                { t: 0.3, angleZ: -25, angleX: 5 },
+                { t: 0.6, angleZ: -30, angleX: 8 },
+                { t: 0.8, angleZ: -20, angleX: 3 },
+                { t: 1.0, angleZ: 0, angleX: 0 }
+            ],
+            duration: 2500,
+            relative: true
+        },
+
+        // Random look around - combines head turn with eye movement
+        look_around: {
+            keyframes: [
+                { t: 0.0, angleZ: 0, angleX: 0, eyeBallX: 0 },
+                { t: 0.2, angleZ: 15, angleX: -8, eyeBallX: -0.4 },
+                { t: 0.5, angleZ: -15, angleX: 8, eyeBallX: 0.4 },
+                { t: 0.8, angleZ: 5, angleX: -3, eyeBallX: -0.1 },
+                { t: 1.0, angleZ: 0, angleX: 0, eyeBallX: 0 }
+            ],
+            duration: 3000,
+            relative: true
+        },
+
         // === HEAD TILTS ===
         tilt: {
             keyframes: [
@@ -1171,9 +1209,12 @@ const ACTION_LIBRARY = {
         tilt_right: 'tilt_right',
         tilt_curious: 'tilt_curious',
         curious: 'tilt_curious',
-        lookup: 'look_up',       // Head tilts up (thinking)
+        turn_left: 'head_turn_left',    // Big head turn left (angleZ 30)
+        turn_right: 'head_turn_right',  // Big head turn right (angleZ -30)
+        look_around: 'look_around',     // Random look around
+        lookup: 'look_up',              // Head tilts up (thinking)
         look_up: 'look_up',
-        think: 'ponder',         // Thinking pose with head tilt
+        think: 'ponder',                // Thinking pose with head tilt
         ponder: 'ponder'
     },
 

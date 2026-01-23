@@ -85,6 +85,31 @@ class AvatarTest {
         this.actionParser = null;
         this.actionLibrary = null;
         this.actionExecutor = null;
+
+        // WebSocket hybrid mode
+        this.ws = null;
+        this.wsConnected = false;
+        this.avatarId = 'buddy';
+        this.currentState = 'idle';
+        this.currentMood = 'neutral';
+
+        // TTS audio for server-triggered speech
+        this.ttsAudio = null;
+        this.ttsAudioContext = null;
+        this.ttsAnalyser = null;
+        this.ttsDataArray = null;
+        this.ttsAudioConnected = false;
+        this.ttsLipSyncActive = false;
+        this.ttsSmoothedVolume = 0;
+
+        // Event callbacks (can be overridden by external code)
+        this.onServerConnect = null;
+        this.onServerDisconnect = null;
+        this.onStateChange = null;
+        this.onMoodChange = null;
+        this.onGesture = null;
+        this.onAction = null;
+        this.onSpeech = null;
     }
 
     async init() {
@@ -883,6 +908,368 @@ class AvatarTest {
         } else {
             console.warn('[AvatarTest] Action system not available');
         }
+    }
+
+    // === WebSocket Hybrid Mode ===
+
+    /**
+     * Connect to server for hybrid command mode.
+     * Server sends commands (mood, gesture, state, speech); browser animates at 60fps.
+     * @param {string} avatarId - Avatar ID for WebSocket connection
+     */
+    connectServer(avatarId = 'buddy') {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log('[AvatarTest] Already connected, disconnecting first');
+            this.disconnectServer();
+        }
+
+        // Switch to strict mode when connecting to server
+        // Server handles random behaviors at 2fps, browser just executes smoothly
+        this.setServerStrictMode(true);
+
+        this.avatarId = avatarId;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}/ws/avatar/${avatarId}`;
+
+        console.log(`[AvatarTest] Connecting to ${url}...`);
+        this.ws = new WebSocket(url);
+
+        this.ws.onopen = () => {
+            this.wsConnected = true;
+            console.log('[AvatarTest] WebSocket connected');
+            this.onServerConnect?.();
+        };
+
+        this.ws.onclose = () => {
+            this.wsConnected = false;
+            console.log('[AvatarTest] WebSocket disconnected');
+            this.onServerDisconnect?.();
+        };
+
+        this.ws.onerror = (error) => {
+            console.error('[AvatarTest] WebSocket error:', error);
+        };
+
+        this.ws.onmessage = (event) => {
+            try {
+                const cmd = JSON.parse(event.data);
+                this.handleServerCommand(cmd);
+            } catch (e) {
+                console.warn('[AvatarTest] Invalid server message:', e);
+            }
+        };
+    }
+
+    /**
+     * Disconnect from server
+     */
+    disconnectServer() {
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        this.wsConnected = false;
+
+        // Restore to hold mode when disconnecting
+        this.setServerStrictMode(false);
+    }
+
+    /**
+     * Switch to/from strict mode for server control.
+     * Strict mode: All Live2D internals disabled, server sends behaviors at 2fps.
+     * @param {boolean} strict - True for strict mode, false for hold mode
+     */
+    setServerStrictMode(strict) {
+        if (!this.model) return;
+
+        const internalModel = this.model.internalModel;
+
+        if (strict) {
+            // Strict mode: disable ALL Live2D internals
+            // Server sends random behaviors at 2fps
+            if (internalModel.motionManager) {
+                internalModel.motionManager.stopAllMotions();
+                internalModel.motionManager.update = () => false;
+            }
+            if (internalModel.expressionManager) {
+                internalModel.expressionManager.update = () => false;
+            }
+            internalModel.physics = null;
+            internalModel.pose = null;
+            internalModel.eyeBlink = null;
+            internalModel.breath = null;
+            console.log('[AvatarTest] Server strict mode: All Live2D internals disabled');
+        } else {
+            // Hold mode: keep physics/breath/blink for natural movement
+            if (internalModel.motionManager) {
+                internalModel.motionManager.stopAllMotions();
+                internalModel.motionManager.update = () => false;
+            }
+            if (internalModel.expressionManager) {
+                internalModel.expressionManager.update = () => false;
+            }
+            // Restore natural movement components
+            if (this._originalPhysics) internalModel.physics = this._originalPhysics;
+            if (this._originalEyeBlink) internalModel.eyeBlink = this._originalEyeBlink;
+            if (this._originalBreath) internalModel.breath = this._originalBreath;
+            console.log('[AvatarTest] Hold mode: Physics/breath/blink active');
+        }
+    }
+
+    /**
+     * Send message to server
+     */
+    sendToServer(data) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(data));
+        }
+    }
+
+    /**
+     * Handle command from server (hybrid mode)
+     * Commands: state, mood, gesture, action, speech
+     */
+    handleServerCommand(cmd) {
+        // Don't log frequent idle gestures
+        const quietGestures = ['idle_sway', 'idle_breathe', 'blink'];
+        const isQuiet = cmd.type === 'gesture' && quietGestures.includes(cmd.name);
+        if (!isQuiet) {
+            console.log(`[AvatarTest] Server command: ${cmd.type}`, cmd);
+        }
+
+        switch (cmd.type) {
+            case 'init':
+                // Initial sync when connecting
+                console.log(`[AvatarTest] Init: state=${cmd.state}, mood=${cmd.mood}`);
+                if (cmd.state) this.handleStateCommand(cmd.state);
+                if (cmd.mood) this.handleMoodCommand(cmd.mood, 1.0);
+                break;
+
+            case 'state':
+                this.handleStateCommand(cmd.value);
+                break;
+
+            case 'mood':
+                this.handleMoodCommand(cmd.name, cmd.intensity || 1.0);
+                break;
+
+            case 'gesture':
+                this.handleGestureCommand(cmd.name, cmd.intensity || 1.0);
+                break;
+
+            case 'action':
+                this.handleActionCommand(cmd.name, cmd.params || {});
+                break;
+
+            case 'speech':
+                this.handleSpeechCommand(cmd.text, cmd.audio_base64);
+                break;
+
+            default:
+                console.warn(`[AvatarTest] Unknown command type: ${cmd.type}`);
+        }
+    }
+
+    /**
+     * Handle state change command
+     */
+    handleStateCommand(state) {
+        this.currentState = state;
+        console.log(`[AvatarTest] State: ${state}`);
+
+        // Trigger state-specific behaviors
+        switch (state) {
+            case 'idle':
+                // Reset to relaxed idle
+                break;
+            case 'listening':
+                // Attentive behavior
+                if (this.actionExecutor) {
+                    this.actionExecutor.setMood('friendly', { intensity: 0.5 });
+                }
+                break;
+            case 'speaking':
+                // Speaking state - lip sync handled separately
+                break;
+            case 'thinking':
+                // Contemplative
+                if (this.actionExecutor) {
+                    this.actionExecutor.setMood('thinking', { intensity: 0.7 });
+                }
+                break;
+        }
+
+        // Fire callback if registered
+        this.onStateChange?.(state);
+    }
+
+    /**
+     * Handle mood change command
+     */
+    handleMoodCommand(mood, intensity = 1.0) {
+        if (!this.actionExecutor) {
+            console.warn('[AvatarTest] ActionExecutor not initialized');
+            return;
+        }
+
+        this.currentMood = mood;
+        this.actionExecutor.setMood(mood, { intensity });
+        console.log(`[AvatarTest] Mood: ${mood} (intensity: ${intensity})`);
+
+        // Fire callback if registered
+        this.onMoodChange?.(mood, intensity);
+    }
+
+    /**
+     * Handle gesture command
+     */
+    handleGestureCommand(gesture, intensity = 1.0) {
+        if (!this.actionExecutor) {
+            console.warn('[AvatarTest] ActionExecutor not initialized');
+            return;
+        }
+
+        this.actionExecutor.playGesture(gesture, { intensity });
+        console.log(`[AvatarTest] Gesture: ${gesture} (intensity: ${intensity})`);
+
+        // Fire callback if registered
+        this.onGesture?.(gesture, intensity);
+    }
+
+    /**
+     * Handle compound action command
+     */
+    handleActionCommand(action, params = {}) {
+        if (!this.actionExecutor) {
+            console.warn('[AvatarTest] ActionExecutor not initialized');
+            return;
+        }
+
+        this.actionExecutor.executeAction(action, params);
+        console.log(`[AvatarTest] Action: ${action}`, params);
+
+        // Fire callback if registered
+        this.onAction?.(action, params);
+    }
+
+    /**
+     * Handle speech command - play audio and lip sync
+     */
+    handleSpeechCommand(text, audioBase64) {
+        console.log(`[AvatarTest] Speech: "${text?.substring(0, 50)}..."`);
+
+        if (audioBase64) {
+            this.playTTSAudio(audioBase64);
+        }
+
+        // Fire callback if registered
+        this.onSpeech?.(text, audioBase64);
+    }
+
+    /**
+     * Play TTS audio and sync lip movement
+     */
+    playTTSAudio(audioBase64) {
+        if (!this.ttsAudio) {
+            this.ttsAudio = new Audio();
+
+            // Setup audio context for lip sync if not exists
+            if (!this.ttsAudioContext) {
+                this.ttsAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                this.ttsAnalyser = this.ttsAudioContext.createAnalyser();
+                this.ttsAnalyser.fftSize = 256;
+                this.ttsAnalyser.smoothingTimeConstant = 0.5;
+                this.ttsDataArray = new Uint8Array(this.ttsAnalyser.frequencyBinCount);
+            }
+        }
+
+        // Stop any currently playing audio
+        if (!this.ttsAudio.paused) {
+            this.ttsAudio.pause();
+            this.ttsAudio.currentTime = 0;
+        }
+
+        // Set new audio source
+        this.ttsAudio.src = `data:audio/mp3;base64,${audioBase64}`;
+
+        // Connect to analyser if not already connected
+        if (!this.ttsAudioConnected) {
+            try {
+                const source = this.ttsAudioContext.createMediaElementSource(this.ttsAudio);
+                source.connect(this.ttsAnalyser);
+                this.ttsAnalyser.connect(this.ttsAudioContext.destination);
+                this.ttsAudioConnected = true;
+            } catch (e) {
+                console.warn('[AvatarTest] Audio already connected or error:', e.message);
+            }
+        }
+
+        // Resume audio context if suspended
+        if (this.ttsAudioContext.state === 'suspended') {
+            this.ttsAudioContext.resume();
+        }
+
+        // Start lip sync animation
+        this.startTTSLipSync();
+
+        // Play audio
+        this.ttsAudio.play().catch(e => {
+            console.warn('[AvatarTest] Audio playback failed:', e);
+        });
+
+        // Stop lip sync when audio ends
+        this.ttsAudio.onended = () => {
+            this.stopTTSLipSync();
+            // Notify server that speech is complete
+            this.sendToServer({ type: 'ready' });
+        };
+    }
+
+    /**
+     * Start TTS lip sync animation loop
+     */
+    startTTSLipSync() {
+        if (this.ttsLipSyncActive) return;
+        this.ttsLipSyncActive = true;
+
+        const animateLipSync = () => {
+            if (!this.ttsLipSyncActive) return;
+
+            // Get volume from analyser
+            this.ttsAnalyser.getByteFrequencyData(this.ttsDataArray);
+
+            // Calculate volume from low frequencies (voice range)
+            let sum = 0;
+            for (let i = 2; i < 20; i++) {
+                sum += this.ttsDataArray[i];
+            }
+            const avg = sum / 18 / 255;
+            const smoothed = this.ttsSmoothedVolume * 0.3 + avg * 0.7;
+            this.ttsSmoothedVolume = smoothed;
+
+            // Convert to mouth open value with sensitivity
+            const mouthOpen = Math.min(1, Math.pow(smoothed, 0.7) * 1.5);
+
+            // Apply to avatar
+            this.setParam('mouthOpen', mouthOpen);
+
+            // Send lip sync amplitude to server
+            this.sendToServer({ type: 'lipsync', amplitude: mouthOpen });
+
+            requestAnimationFrame(animateLipSync);
+        };
+
+        this.ttsSmoothedVolume = 0;
+        animateLipSync();
+    }
+
+    /**
+     * Stop TTS lip sync animation
+     */
+    stopTTSLipSync() {
+        this.ttsLipSyncActive = false;
+        this.setParam('mouthOpen', 0);
+        this.sendToServer({ type: 'lipsync', amplitude: 0 });
     }
 }
 

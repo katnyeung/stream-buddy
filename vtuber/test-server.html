@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VTuber Hybrid Mode Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 15px 20px;
+            background: rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.2rem;
+            font-weight: 500;
+        }
+
+        .header-info {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .status {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .status.connecting { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .status.connected { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+        .status.disconnected { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+        .status.loading { background: rgba(33, 150, 243, 0.2); color: #2196f3; }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        .canvas-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+            min-height: 500px;
+        }
+
+        #avatar-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .state-indicator {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            padding: 8px 16px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 20px;
+            font-size: 0.85rem;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .state-indicator .state {
+            color: #4caf50;
+            font-weight: 600;
+        }
+
+        .state-indicator .mood {
+            color: #ffc107;
+        }
+
+        .fps-counter {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            padding: 6px 12px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-family: monospace;
+        }
+
+        .control-panel {
+            width: 380px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            overflow-y: auto;
+            max-height: calc(100vh - 100px);
+        }
+
+        .control-section {
+            margin-bottom: 20px;
+        }
+
+        .control-section h3 {
+            font-size: 0.9rem;
+            color: #888;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .control-row {
+            margin-bottom: 12px;
+        }
+
+        .control-row label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            font-size: 0.85rem;
+        }
+
+        .control-row label span {
+            color: #666;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            appearance: none;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #ffa502;
+            cursor: pointer;
+        }
+
+        .button-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+
+        .button-grid-3 {
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .button-grid-4 {
+            grid-template-columns: repeat(4, 1fr);
+        }
+
+        button {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        button.primary {
+            background: rgba(255, 165, 2, 0.3);
+            grid-column: span 2;
+        }
+
+        button.primary:hover {
+            background: rgba(255, 165, 2, 0.5);
+        }
+
+        button.active {
+            background: rgba(76, 175, 80, 0.4);
+            border: 1px solid #4caf50;
+        }
+
+        button.state-btn.active {
+            background: rgba(33, 150, 243, 0.4);
+            border: 1px solid #2196f3;
+        }
+
+        button.mood-btn.active {
+            background: rgba(255, 193, 7, 0.4);
+            border: 1px solid #ffc107;
+        }
+
+        .model-url-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+        }
+
+        .model-url-input::placeholder {
+            color: #666;
+        }
+
+        .hint {
+            color: #888;
+            font-size: 0.75rem;
+            margin-top: 6px;
+        }
+
+        .volume-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .volume-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4caf50, #ffc107, #f44336);
+            transition: width 0.05s;
+        }
+
+        .log-display {
+            font-size: 0.7rem;
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+        }
+
+        .log-display .log-item {
+            margin-bottom: 4px;
+            opacity: 0.8;
+        }
+
+        .log-display .log-item.info { color: #4caf50; }
+        .log-display .log-item.warn { color: #ffc107; }
+        .log-display .log-item.error { color: #f44336; }
+        .log-display .log-item.cmd { color: #2196f3; }
+
+        .architecture-badge {
+            background: rgba(156, 39, 176, 0.3);
+            color: #ce93d8;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>VTuber Hybrid Mode Test</h1>
+        <div class="header-info">
+            <span class="architecture-badge">HYBRID: Commands via Redis</span>
+            <div class="status disconnected" id="ws-status">Disconnected</div>
+            <div class="status loading" id="model-status">No Model</div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <!-- Left: Avatar Canvas -->
+        <div class="canvas-container">
+            <canvas id="avatar-canvas"></canvas>
+            <div class="state-indicator">
+                <span>State: <span class="state" id="current-state">idle</span></span>
+                <span>Mood: <span class="mood" id="current-mood">neutral</span></span>
+            </div>
+            <div class="fps-counter" id="fps-counter">FPS: --</div>
+        </div>
+
+        <!-- Right: Control Panel -->
+        <div class="control-panel">
+            <!-- Connection -->
+            <div class="control-section">
+                <h3>Connection</h3>
+                <input type="text" class="model-url-input" id="avatar-id"
+                    placeholder="Avatar ID" value="buddy">
+                <div class="button-grid">
+                    <button id="connect-btn" class="primary">Connect to Server</button>
+                </div>
+                <p class="hint">WebSocket: /ws/avatar/{id} - Commands forwarded via Redis Pub/Sub</p>
+            </div>
+
+            <!-- Model Loading -->
+            <div class="control-section">
+                <h3>Model</h3>
+                <input type="text" class="model-url-input" id="model-url"
+                    placeholder="Model URL (.model3.json)"
+                    value="https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json">
+                <button class="primary" id="load-model-btn">Load Model</button>
+            </div>
+
+            <!-- State Control (sends commands) -->
+            <div class="control-section">
+                <h3>Avatar State (Commands)</h3>
+                <div class="button-grid button-grid-4">
+                    <button class="state-btn active" data-state="idle">Idle</button>
+                    <button class="state-btn" data-state="listening">Listening</button>
+                    <button class="state-btn" data-state="speaking">Speaking</button>
+                    <button class="state-btn" data-state="thinking">Thinking</button>
+                </div>
+                <p class="hint">Sends {"type": "state", "value": "..."} command</p>
+            </div>
+
+            <!-- Mood Control (sends commands) -->
+            <div class="control-section">
+                <h3>Mood (Commands)</h3>
+                <div class="button-grid button-grid-4">
+                    <button class="mood-btn active" data-mood="neutral">Neutral</button>
+                    <button class="mood-btn" data-mood="happy">Happy</button>
+                    <button class="mood-btn" data-mood="friendly">Friendly</button>
+                    <button class="mood-btn" data-mood="curious">Curious</button>
+                    <button class="mood-btn" data-mood="thinking">Thinking</button>
+                    <button class="mood-btn" data-mood="surprised">Surprised</button>
+                    <button class="mood-btn" data-mood="sad">Sad</button>
+                    <button class="mood-btn" data-mood="excited">Excited</button>
+                    <button class="mood-btn" data-mood="serious">Serious</button>
+                    <button class="mood-btn" data-mood="concerned">Concerned</button>
+                    <button class="mood-btn" data-mood="skeptical">Skeptical</button>
+                    <button class="mood-btn" data-mood="confident">Confident</button>
+                </div>
+                <p class="hint">Sends {"type": "mood", "name": "...", "intensity": 1.0}</p>
+            </div>
+
+            <!-- Gestures (sends commands) -->
+            <div class="control-section">
+                <h3>Gestures (Commands)</h3>
+                <label style="font-size: 0.75rem; color: #aaa; margin-bottom: 4px; display: block;">Head</label>
+                <div class="button-grid button-grid-4" style="margin-bottom: 8px;">
+                    <button class="gesture-btn" data-gesture="nod">Nod</button>
+                    <button class="gesture-btn" data-gesture="nod_double">Nod x2</button>
+                    <button class="gesture-btn" data-gesture="shake">Shake</button>
+                    <button class="gesture-btn" data-gesture="tilt">Tilt</button>
+                </div>
+
+                <label style="font-size: 0.75rem; color: #aaa; margin-bottom: 4px; display: block;">Eyes</label>
+                <div class="button-grid button-grid-4" style="margin-bottom: 8px;">
+                    <button class="gesture-btn" data-gesture="blink">Blink</button>
+                    <button class="gesture-btn" data-gesture="wink">Wink</button>
+                    <button class="gesture-btn" data-gesture="look_away">Look Away</button>
+                    <button class="gesture-btn" data-gesture="eye_roll">Eye Roll</button>
+                </div>
+
+                <label style="font-size: 0.75rem; color: #aaa; margin-bottom: 4px; display: block;">Body</label>
+                <div class="button-grid button-grid-4" style="margin-bottom: 8px;">
+                    <button class="gesture-btn" data-gesture="lean_in">Lean In</button>
+                    <button class="gesture-btn" data-gesture="shrug">Shrug</button>
+                    <button class="gesture-btn" data-gesture="bounce">Bounce</button>
+                    <button class="gesture-btn" data-gesture="laugh">Laugh</button>
+                </div>
+
+                <label style="font-size: 0.75rem; color: #aaa; margin-bottom: 4px; display: block;">Arms</label>
+                <div class="button-grid button-grid-4">
+                    <button class="gesture-btn" data-gesture="wave">Wave</button>
+                    <button class="gesture-btn" data-gesture="thumbs_up">Thumbs Up</button>
+                    <button class="gesture-btn" data-gesture="clap">Clap</button>
+                    <button class="gesture-btn" data-gesture="present">Present</button>
+                </div>
+                <p class="hint">Sends {"type": "gesture", "name": "...", "intensity": 1.0}</p>
+            </div>
+
+            <!-- Lip Sync Test -->
+            <div class="control-section">
+                <h3>Lip Sync Test</h3>
+                <div class="control-row">
+                    <label>Manual Amplitude <span id="amp-val">0.00</span></label>
+                    <input type="range" id="amplitude-slider" min="0" max="1" step="0.01" value="0">
+                </div>
+                <div class="volume-bar">
+                    <div class="volume-bar-fill" id="volume-fill"></div>
+                </div>
+                <p class="hint">Sends {"type": "lipsync", "amplitude": ...} to server</p>
+            </div>
+
+            <!-- Command Log -->
+            <div class="control-section">
+                <h3>Command Log</h3>
+                <div class="log-display" id="log-display"></div>
+                <button id="clear-log-btn" style="margin-top: 8px; width: 100%;">Clear Log</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio element for TTS playback -->
+    <audio id="tts-audio"></audio>
+
+    <!-- PIXI.js v6 -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <!-- Live2D Cubism 4 Core SDK -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Live2D Display Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <!-- Action System -->
+    <script src="/static/js/action-parser.js"></script>
+    <script src="/static/js/action-library.js"></script>
+    <script src="/static/js/action-executor.js"></script>
+
+    <script>
+    // Parameter aliases for Live2D
+    const PARAM_MAP = {
+        angleX: ['ParamAngleX', 'PARAM_ANGLE_X'],
+        angleY: ['ParamAngleY', 'PARAM_ANGLE_Y'],
+        angleZ: ['ParamAngleZ', 'PARAM_ANGLE_Z'],
+        mouthOpen: ['ParamMouthOpenY', 'PARAM_MOUTH_OPEN_Y'],
+        mouthForm: ['ParamMouthForm', 'PARAM_MOUTH_FORM'],
+        eyeOpenL: ['ParamEyeLOpen', 'PARAM_EYE_L_OPEN'],
+        eyeOpenR: ['ParamEyeROpen', 'PARAM_EYE_R_OPEN'],
+        eyeBallX: ['ParamEyeBallX', 'PARAM_EYE_BALL_X'],
+        eyeBallY: ['ParamEyeBallY', 'PARAM_EYE_BALL_Y'],
+        browLY: ['ParamBrowLY', 'PARAM_BROW_L_Y'],
+        browRY: ['ParamBrowRY', 'PARAM_BROW_R_Y'],
+        bodyAngleX: ['ParamBodyAngleX', 'PARAM_BODY_ANGLE_X'],
+        bodyAngleY: ['ParamBodyAngleY', 'PARAM_BODY_ANGLE_Y'],
+        bodyAngleZ: ['ParamBodyAngleZ', 'PARAM_BODY_ANGLE_Z'],
+        armLA: ['ParamArmLA'],
+        armRA: ['ParamArmRA'],
+        armLB: ['ParamArmLB'],
+        armRB: ['ParamArmRB'],
+        handChangeL: ['ParamHandDhangeL'],
+        handChangeR: ['ParamHandChangeR'],
+        handAngleL: ['ParamHandAngleL'],
+        handAngleR: ['ParamHandAngleR'],
+        eyeSmileL: ['ParamEyeLSmile'],
+        eyeSmileR: ['ParamEyeRSmile'],
+        tear: ['ParamTear'],
+        tere: ['ParamTere'],
+        breath: ['ParamBreath']
+    };
+
+    class HybridModeTest {
+        constructor() {
+            this.app = null;
+            this.model = null;
+            this.ws = null;
+            this.avatarId = 'buddy';
+            this.connected = false;
+
+            // State
+            this.currentState = 'idle';
+            this.currentMood = 'neutral';
+
+            // FPS tracking
+            this.frameCount = 0;
+            this.lastFpsUpdate = Date.now();
+
+            // Action system
+            this.actionParser = null;
+            this.actionLibrary = null;
+            this.actionExecutor = null;
+
+            // Audio
+            this.ttsAudio = document.getElementById('tts-audio');
+        }
+
+        log(message, type = 'info') {
+            const logDisplay = document.getElementById('log-display');
+            const item = document.createElement('div');
+            item.className = `log-item ${type}`;
+            item.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDisplay.appendChild(item);
+            logDisplay.scrollTop = logDisplay.scrollHeight;
+
+            // Keep only last 50 items
+            while (logDisplay.children.length > 50) {
+                logDisplay.removeChild(logDisplay.firstChild);
+            }
+        }
+
+        async init() {
+            this.log('Initializing hybrid mode test...');
+
+            // Create PIXI app
+            const canvas = document.getElementById('avatar-canvas');
+            const container = canvas.parentElement;
+
+            this.app = new PIXI.Application({
+                view: canvas,
+                width: container.clientWidth,
+                height: container.clientHeight,
+                backgroundColor: 0x1a1a2e,
+                backgroundAlpha: 0,
+                resolution: window.devicePixelRatio || 1,
+                autoDensity: true
+            });
+
+            // Handle resize
+            window.addEventListener('resize', () => this.handleResize());
+
+            // Setup controls
+            this.setupControls();
+
+            // FPS counter
+            this.app.ticker.add(() => {
+                this.frameCount++;
+                const now = Date.now();
+                if (now - this.lastFpsUpdate >= 1000) {
+                    document.getElementById('fps-counter').textContent = `FPS: ${this.frameCount}`;
+                    this.frameCount = 0;
+                    this.lastFpsUpdate = now;
+                }
+            });
+
+            this.log('Initialized - Load a model and connect to server');
+        }
+
+        async loadModel(url) {
+            if (!url) return;
+
+            document.getElementById('model-status').textContent = 'Loading...';
+            document.getElementById('model-status').className = 'status loading';
+            this.log(`Loading model: ${url}`);
+
+            if (this.model) {
+                this.app.stage.removeChild(this.model);
+                this.model.destroy();
+                this.model = null;
+            }
+
+            try {
+                const { Live2DModel } = PIXI.live2d;
+                this.model = await Live2DModel.from(url, { autoInteract: false });
+
+                // Set to "Strict" mode - disable ALL Live2D internals
+                // Server sends random actions at 2fps, browser executes smoothly at 60fps
+                const internalModel = this.model.internalModel;
+                if (internalModel.motionManager) {
+                    internalModel.motionManager.stopAllMotions();
+                    internalModel.motionManager.update = () => false;
+                }
+                if (internalModel.expressionManager) {
+                    internalModel.expressionManager.update = () => false;
+                }
+                internalModel.physics = null;
+                internalModel.pose = null;
+                internalModel.eyeBlink = null;
+                internalModel.breath = null;
+
+                this.positionModel();
+                this.app.stage.addChild(this.model);
+
+                // Initialize action system
+                this.initActionSystem();
+
+                document.getElementById('model-status').textContent = 'Model Ready';
+                document.getElementById('model-status').className = 'status connected';
+                this.log('Model loaded - Strict mode (server controls all behavior at 2fps)', 'info');
+
+                window.model = this.model;
+
+            } catch (err) {
+                document.getElementById('model-status').textContent = 'Load Failed';
+                document.getElementById('model-status').className = 'status disconnected';
+                this.log(`Model load failed: ${err.message}`, 'error');
+            }
+        }
+
+        initActionSystem() {
+            if (typeof ActionParser === 'undefined' ||
+                typeof ActionLibrary === 'undefined' ||
+                typeof ActionExecutor === 'undefined') {
+                this.log('Action system not available', 'warn');
+                return;
+            }
+
+            this.actionParser = new ActionParser();
+            this.actionLibrary = new ActionLibrary();
+            this.actionExecutor = new ActionExecutor(
+                this.actionLibrary,
+                (param, value) => this.setParam(param, value),
+                (partId, opacity) => this.setPartOpacity(partId, opacity)
+            );
+
+            // Start the executor's animation loop
+            this.actionExecutor.start();
+            this.log('Action system initialized (60fps local animation)', 'info');
+        }
+
+        positionModel() {
+            if (!this.model) return;
+
+            const container = this.app.view.parentElement;
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            const scale = Math.min(width / 1200, height / 1200) * 0.4;
+            this.model.scale.set(scale);
+            this.model.anchor.set(0.5, 0.5);
+            this.model.x = width / 2;
+            this.model.y = height / 2 + height * 0.15;
+        }
+
+        handleResize() {
+            if (!this.app) return;
+            const container = this.app.view.parentElement;
+            this.app.renderer.resize(container.clientWidth, container.clientHeight);
+            this.positionModel();
+        }
+
+        // === Parameter Control ===
+
+        setParam(key, value) {
+            if (!this.model) return false;
+
+            const coreModel = this.model.internalModel.coreModel;
+            const aliases = PARAM_MAP[key] || [key];
+
+            for (const name of aliases) {
+                try {
+                    if (typeof coreModel.getParameterIndex === 'function') {
+                        const idx = coreModel.getParameterIndex(name);
+                        if (idx >= 0) {
+                            coreModel.setParameterValueByIndex(idx, value);
+                            return true;
+                        }
+                    }
+                } catch (e) {}
+            }
+            return false;
+        }
+
+        setPartOpacity(partIdOrIndex, opacity) {
+            if (!this.model) return false;
+
+            const coreModel = this.model.internalModel.coreModel;
+
+            try {
+                // Disable pose system when manually controlling parts
+                if (this.model.internalModel.pose) {
+                    this.model.internalModel.pose = null;
+                }
+
+                if (coreModel._partIds && coreModel._partOpacities) {
+                    let index = partIdOrIndex;
+                    if (typeof partIdOrIndex === 'string') {
+                        index = coreModel._partIds.indexOf(partIdOrIndex);
+                    }
+                    if (index >= 0 && index < coreModel._partOpacities.length) {
+                        coreModel._partOpacities[index] = opacity;
+                        return true;
+                    }
+                }
+            } catch (e) {
+                console.error('Error setting part opacity:', e);
+            }
+            return false;
+        }
+
+        // === WebSocket ===
+
+        connect() {
+            this.avatarId = document.getElementById('avatar-id').value || 'buddy';
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${protocol}//${window.location.host}/ws/avatar/${this.avatarId}`;
+
+            this.log(`Connecting to ${url}...`);
+            document.getElementById('ws-status').textContent = 'Connecting...';
+            document.getElementById('ws-status').className = 'status connecting';
+
+            if (this.ws) {
+                this.ws.close();
+            }
+
+            this.ws = new WebSocket(url);
+
+            this.ws.onopen = () => {
+                this.connected = true;
+                document.getElementById('ws-status').textContent = 'Connected';
+                document.getElementById('ws-status').className = 'status connected';
+                document.getElementById('connect-btn').textContent = 'Disconnect';
+                this.log('WebSocket connected - ready to receive commands', 'info');
+            };
+
+            this.ws.onclose = () => {
+                this.connected = false;
+                document.getElementById('ws-status').textContent = 'Disconnected';
+                document.getElementById('ws-status').className = 'status disconnected';
+                document.getElementById('connect-btn').textContent = 'Connect to Server';
+                this.log('WebSocket disconnected', 'warn');
+            };
+
+            this.ws.onerror = (error) => {
+                this.log(`WebSocket error: ${error}`, 'error');
+            };
+
+            this.ws.onmessage = (event) => {
+                const cmd = JSON.parse(event.data);
+                this.handleCommand(cmd);
+            };
+        }
+
+        disconnect() {
+            if (this.ws) {
+                this.ws.close();
+                this.ws = null;
+            }
+        }
+
+        send(data) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify(data));
+                this.log(`Sent: ${JSON.stringify(data)}`, 'cmd');
+            }
+        }
+
+        // === Command Handling ===
+
+        handleCommand(cmd) {
+            // Don't log frequent gesture commands (idle_sway, idle_breathe, blink)
+            const quietGestures = ['idle_sway', 'idle_breathe', 'blink'];
+            const isQuiet = cmd.type === 'gesture' && quietGestures.includes(cmd.name);
+            if (!isQuiet) {
+                this.log(`Received: ${JSON.stringify(cmd)}`, 'cmd');
+            }
+
+            switch (cmd.type) {
+                case 'init':
+                    this.log(`Init sync: state=${cmd.state}, mood=${cmd.mood}`);
+                    this.updateStateUI(cmd.state);
+                    this.updateMoodUI(cmd.mood);
+                    if (this.actionExecutor && cmd.mood) {
+                        this.actionExecutor.setMood(cmd.mood);
+                    }
+                    break;
+
+                case 'state':
+                    this.currentState = cmd.value;
+                    this.updateStateUI(cmd.value);
+                    this.log(`State: ${cmd.value}`);
+                    break;
+
+                case 'mood':
+                    this.currentMood = cmd.name;
+                    this.updateMoodUI(cmd.name);
+                    if (this.actionExecutor) {
+                        this.actionExecutor.setMood(cmd.name, { intensity: cmd.intensity || 1.0 });
+                    }
+                    this.log(`Mood: ${cmd.name} (intensity: ${cmd.intensity || 1.0})`);
+                    break;
+
+                case 'gesture':
+                    if (this.actionExecutor) {
+                        this.actionExecutor.playGesture(cmd.name, { intensity: cmd.intensity || 1.0 });
+                    }
+                    this.log(`Gesture: ${cmd.name} (intensity: ${cmd.intensity || 1.0})`);
+                    break;
+
+                case 'action':
+                    if (this.actionExecutor) {
+                        this.actionExecutor.executeAction(cmd.name, cmd.params || {});
+                    }
+                    this.log(`Action: ${cmd.name}`);
+                    break;
+
+                case 'speech':
+                    this.log(`Speech: "${(cmd.text || '').substring(0, 40)}..."`);
+                    if (cmd.audio_base64) {
+                        this.playSpeech(cmd.audio_base64);
+                    }
+                    break;
+
+                default:
+                    this.log(`Unknown command: ${cmd.type}`, 'warn');
+            }
+        }
+
+        updateStateUI(state) {
+            document.getElementById('current-state').textContent = state;
+            document.querySelectorAll('.state-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.state === state);
+            });
+        }
+
+        updateMoodUI(mood) {
+            document.getElementById('current-mood').textContent = mood;
+            document.querySelectorAll('.mood-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mood === mood);
+            });
+        }
+
+        // === Audio ===
+
+        async playSpeech(audioBase64) {
+            try {
+                this.ttsAudio.src = `data:audio/mp3;base64,${audioBase64}`;
+                await this.ttsAudio.play();
+                this.log('Playing TTS audio');
+
+                // Signal ready when done
+                this.ttsAudio.onended = () => {
+                    this.send({ type: 'ready' });
+                };
+            } catch (error) {
+                this.log(`Audio playback error: ${error}`, 'error');
+            }
+        }
+
+        // === Controls ===
+
+        setupControls() {
+            // Connect button
+            document.getElementById('connect-btn').addEventListener('click', () => {
+                if (this.connected) {
+                    this.disconnect();
+                } else {
+                    this.connect();
+                }
+            });
+
+            // Load model button
+            document.getElementById('load-model-btn').addEventListener('click', () => {
+                this.loadModel(document.getElementById('model-url').value);
+            });
+
+            // State buttons - send commands
+            document.querySelectorAll('.state-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const state = btn.dataset.state;
+                    this.send({ type: 'set_state', state });
+                });
+            });
+
+            // Mood buttons - send commands
+            document.querySelectorAll('.mood-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const mood = btn.dataset.mood;
+                    this.send({ type: 'set_mood', mood, intensity: 1.0 });
+                });
+            });
+
+            // Gesture buttons - send commands
+            document.querySelectorAll('.gesture-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const gesture = btn.dataset.gesture;
+                    this.send({ type: 'gesture', name: gesture, intensity: 1.0 });
+                });
+            });
+
+            // Amplitude slider (lip sync test)
+            const ampSlider = document.getElementById('amplitude-slider');
+            const ampVal = document.getElementById('amp-val');
+            const volumeFill = document.getElementById('volume-fill');
+
+            ampSlider.addEventListener('input', () => {
+                const amp = parseFloat(ampSlider.value);
+                ampVal.textContent = amp.toFixed(2);
+                volumeFill.style.width = `${amp * 100}%`;
+                this.send({ type: 'lipsync', amplitude: amp });
+
+                // Also apply locally
+                this.setParam('mouthOpen', amp);
+            });
+
+            // Clear log button
+            document.getElementById('clear-log-btn').addEventListener('click', () => {
+                document.getElementById('log-display').innerHTML = '';
+            });
+        }
+    }
+
+    // Initialize on load
+    document.addEventListener('DOMContentLoaded', () => {
+        window.test = new HybridModeTest();
+        window.test.init();
+    });
+    </script>
+</body>
+</html>

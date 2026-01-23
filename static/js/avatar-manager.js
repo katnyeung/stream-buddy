@@ -41,6 +41,16 @@ class AvatarManager {
         // Callbacks
         this.onReady = options.onReady || null;
         this.onError = options.onError || null;
+
+        // Hybrid server mode (WebSocket to Redis backbone)
+        this.serverWs = null;
+        this.serverConnected = false;
+        this.avatarId = options.avatarId || 'buddy';
+
+        // Server mode callbacks
+        this.onServerConnect = null;
+        this.onServerDisconnect = null;
+        this.onServerCommand = null;
     }
 
     /**
@@ -580,6 +590,7 @@ class AvatarManager {
      */
     destroy() {
         this._stopLipSync();
+        this.disconnectServer();
 
         if (this.stateMachine) {
             this.stateMachine.stop();
@@ -599,6 +610,167 @@ class AvatarManager {
         }
 
         this.isInitialized = false;
+    }
+
+    // =========================================
+    // HYBRID SERVER MODE
+    // Connect to Redis backbone via WebSocket
+    // Server sends commands, browser animates at 60fps
+    // =========================================
+
+    /**
+     * Connect to server for hybrid command mode.
+     * Server sends commands (mood, gesture, state, speech); browser animates at 60fps.
+     * @param {string} avatarId - Avatar ID for WebSocket connection
+     */
+    connectServer(avatarId = null) {
+        if (avatarId) this.avatarId = avatarId;
+
+        if (this.serverWs && this.serverWs.readyState === WebSocket.OPEN) {
+            console.log('[AvatarManager] Already connected to server');
+            return;
+        }
+
+        // Switch to strict mode - server controls everything
+        this.setControlMode('strict');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}/ws/avatar/${this.avatarId}`;
+
+        console.log(`[AvatarManager] Connecting to server: ${url}`);
+        this.serverWs = new WebSocket(url);
+
+        this.serverWs.onopen = () => {
+            this.serverConnected = true;
+            console.log('[AvatarManager] Server connected (hybrid mode)');
+            if (this.onServerConnect) this.onServerConnect();
+        };
+
+        this.serverWs.onclose = () => {
+            this.serverConnected = false;
+            console.log('[AvatarManager] Server disconnected');
+            if (this.onServerDisconnect) this.onServerDisconnect();
+        };
+
+        this.serverWs.onerror = (error) => {
+            console.error('[AvatarManager] Server WebSocket error:', error);
+        };
+
+        this.serverWs.onmessage = (event) => {
+            try {
+                const cmd = JSON.parse(event.data);
+                this._handleServerCommand(cmd);
+            } catch (e) {
+                console.warn('[AvatarManager] Invalid server message:', e);
+            }
+        };
+    }
+
+    /**
+     * Disconnect from server
+     */
+    disconnectServer() {
+        if (this.serverWs) {
+            this.serverWs.close();
+            this.serverWs = null;
+        }
+        this.serverConnected = false;
+
+        // Restore to hold mode when disconnecting
+        this.setControlMode('hold');
+        console.log('[AvatarManager] Server disconnected, restored to hold mode');
+    }
+
+    /**
+     * Send message to server
+     */
+    sendToServer(data) {
+        if (this.serverWs && this.serverWs.readyState === WebSocket.OPEN) {
+            this.serverWs.send(JSON.stringify(data));
+        }
+    }
+
+    /**
+     * Handle command from server (hybrid mode)
+     * Commands: init, state, mood, gesture, action, speech
+     */
+    _handleServerCommand(cmd) {
+        // Don't log frequent idle gestures
+        const quietGestures = ['idle_sway', 'idle_breathe', 'blink'];
+        const isQuiet = cmd.type === 'gesture' && quietGestures.includes(cmd.name);
+        if (!isQuiet) {
+            console.log(`[AvatarManager] Server command: ${cmd.type}`, cmd);
+        }
+
+        // Fire callback if registered
+        if (this.onServerCommand) {
+            this.onServerCommand(cmd);
+        }
+
+        switch (cmd.type) {
+            case 'init':
+                // Initial sync when connecting
+                console.log(`[AvatarManager] Init: state=${cmd.state}, mood=${cmd.mood}`);
+                if (cmd.mood && this.actionExecutor) {
+                    this.actionExecutor.setMood(cmd.mood, { intensity: 1.0 });
+                }
+                break;
+
+            case 'state':
+                // State change (idle, listening, speaking, thinking)
+                if (this.stateMachine) {
+                    this.stateMachine.setState(cmd.value);
+                }
+                break;
+
+            case 'mood':
+                // Mood change - use ActionExecutor
+                if (this.actionExecutor) {
+                    this.actionExecutor.setMood(cmd.name, { intensity: cmd.intensity || 1.0 });
+                }
+                break;
+
+            case 'gesture':
+                // Gesture - use ActionExecutor
+                if (this.actionExecutor) {
+                    this.actionExecutor.playGesture(cmd.name, { intensity: cmd.intensity || 1.0 });
+                }
+                break;
+
+            case 'action':
+                // Compound action - use ActionExecutor
+                if (this.actionExecutor) {
+                    this.actionExecutor.executeAction(cmd.name, cmd.params || {});
+                }
+                break;
+
+            case 'speech':
+                // Speech with optional audio
+                console.log(`[AvatarManager] Speech: "${(cmd.text || '').substring(0, 40)}..."`);
+                // Audio playback handled separately by the main app
+                break;
+
+            default:
+                if (!isQuiet) {
+                    console.warn(`[AvatarManager] Unknown command: ${cmd.type}`);
+                }
+        }
+    }
+
+    /**
+     * Set the ActionExecutor instance for server commands
+     * Must be called after ActionExecutor is initialized
+     */
+    setActionExecutor(executor) {
+        this.actionExecutor = executor;
+        console.log('[AvatarManager] ActionExecutor set for server commands');
+    }
+
+    /**
+     * Check if connected to server
+     */
+    isServerConnected() {
+        return this.serverConnected;
     }
 }
 

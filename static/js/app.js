@@ -362,6 +362,15 @@ class StreamBuddy {
                 console.log('[StreamBuddy] StateMachine stopped - ActionExecutor now controls avatar');
             }
 
+            // Connect ActionExecutor to AvatarManager for hybrid server mode
+            if (this.avatarManager) {
+                this.avatarManager.setActionExecutor(this.actionExecutor);
+
+                // Connect to server for hybrid mode (server sends idle behaviors at 2s intervals)
+                this.avatarManager.connectServer(this.sessionId || 'buddy');
+                console.log('[StreamBuddy] Hybrid server mode enabled');
+            }
+
             console.log('[StreamBuddy] Action system initialized');
             console.log('[StreamBuddy] Available moods:', this.actionLibrary.list('moods').join(', '));
             console.log('[StreamBuddy] Available gestures:', this.actionLibrary.list('gestures').join(', '));
@@ -495,6 +504,15 @@ class StreamBuddy {
                 // Store in localStorage for popup windows (localStorage is shared across windows)
                 localStorage.setItem('streambuddy_session_id', this.sessionId);
                 console.log(`[StreamBuddy] Session ready: ${this.sessionId}`);
+
+                // Reconnect avatar to server with correct session ID
+                if (this.avatarManager && this.avatarManager.isServerConnected()) {
+                    this.avatarManager.disconnectServer();
+                }
+                if (this.avatarManager && this.actionExecutor) {
+                    this.avatarManager.connectServer(this.sessionId);
+                    console.log(`[StreamBuddy] Avatar connected to session: ${this.sessionId}`);
+                }
                 // Send script, voice, style, personality, and TTS model
                 this.ws.send(JSON.stringify({
                     type: 'load_script',
