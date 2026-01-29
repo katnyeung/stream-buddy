@@ -83,6 +83,7 @@ class IdleEngine(BaseEngine):
         """
         Generate breathing animation.
         Subtle up/down movement of body and slight head movement.
+        Reduced amplitude for calmer appearance.
         """
         self._breath_time += delta_time * personality.breathing_speed
 
@@ -93,10 +94,10 @@ class IdleEngine(BaseEngine):
         amplitude = personality.breathing_amplitude
 
         return {
-            # Body rises slightly on inhale
-            "bodyAngleY": breath_wave * 1.5 * amplitude,
-            # Head follows body slightly
-            "angleY": breath_wave * 0.8 * amplitude,
+            # Body rises slightly on inhale (reduced from 1.5)
+            "bodyAngleY": breath_wave * 0.8 * amplitude,
+            # Head follows body slightly (reduced from 0.8)
+            "angleY": breath_wave * 0.4 * amplitude,
             # Breath parameter for model (if supported)
             "breath": (breath_wave + 1) / 2 * amplitude,
         }
@@ -108,6 +109,7 @@ class IdleEngine(BaseEngine):
         """
         Generate organic noise-based movement.
         Each parameter uses a different noise channel for independent movement.
+        Reduced multipliers for calmer, less bouncy idle animation.
         """
         t = self._time
         amp = personality.noise_amplitude
@@ -115,16 +117,16 @@ class IdleEngine(BaseEngine):
         head_mult = personality.head_range_multiplier
 
         return {
-            # Head sway - subtle random looking around
-            "angleX": self.noise.get_noise(self.CHANNEL_HEAD_X, t, speed * 0.3) * 3.0 * amp * head_mult,
-            "angleZ": self.noise.get_noise(self.CHANNEL_HEAD_Z, t, speed * 0.2) * 2.0 * amp * head_mult,
+            # Head sway - subtle random looking around (reduced from 3.0/2.0)
+            "angleX": self.noise.get_noise(self.CHANNEL_HEAD_X, t, speed * 0.2) * 1.5 * amp * head_mult,
+            "angleZ": self.noise.get_noise(self.CHANNEL_HEAD_Z, t, speed * 0.15) * 1.0 * amp * head_mult,
 
-            # Body micro-sway
-            "bodyAngleX": self.noise.get_noise(self.CHANNEL_BODY_X, t, speed * 0.15) * 1.5 * amp,
+            # Body micro-sway (reduced from 1.5)
+            "bodyAngleX": self.noise.get_noise(self.CHANNEL_BODY_X, t, speed * 0.1) * 0.8 * amp,
 
-            # Eye drift - very subtle
-            "eyeBallX": self.noise.get_noise(self.CHANNEL_EYE_X, t, speed * 0.4) * 0.15 * amp,
-            "eyeBallY": self.noise.get_noise(self.CHANNEL_EYE_Y, t, speed * 0.35) * 0.1 * amp,
+            # Eye drift - very subtle (reduced)
+            "eyeBallX": self.noise.get_noise(self.CHANNEL_EYE_X, t, speed * 0.25) * 0.1 * amp,
+            "eyeBallY": self.noise.get_noise(self.CHANNEL_EYE_Y, t, speed * 0.2) * 0.08 * amp,
         }
 
     def _update_blink(

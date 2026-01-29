@@ -643,6 +643,11 @@ class AvatarManager {
         this.serverWs.onopen = () => {
             this.serverConnected = true;
             console.log('[AvatarManager] Server connected (hybrid mode)');
+
+            // Start the idle processor on the server
+            this.sendToServer({ type: 'start_idle' });
+            console.log('[AvatarManager] Sent start_idle to server');
+
             if (this.onServerConnect) this.onServerConnect();
         };
 
@@ -671,6 +676,11 @@ class AvatarManager {
      */
     disconnectServer() {
         if (this.serverWs) {
+            // Stop the idle processor before disconnecting
+            if (this.serverWs.readyState === WebSocket.OPEN) {
+                this.sendToServer({ type: 'stop_idle' });
+                console.log('[AvatarManager] Sent stop_idle to server');
+            }
             this.serverWs.close();
             this.serverWs = null;
         }

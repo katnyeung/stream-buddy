@@ -2,7 +2,12 @@
 Action Parser - Extracts action tags from LLM output text.
 
 Tag format: [type:name] or [type:name,param:value,param2:value2]
-Types: mood, gesture, action, eye, head, body, brow
+Types: mood, gesture, action, eye, head, brow, move, zoom, body
+
+Movement tags:
+- [move:up], [move:down], [move:left], [move:right] - Directional movement
+- [zoom:in], [zoom:out], [zoom:normal] - Scale avatar
+- [body:left], [body:right], [body:front] - Body orientation
 
 Example:
     Input:  "[mood:happy] Hello there! [head:nod] How are you? [eye:wink]"
@@ -12,6 +17,16 @@ Example:
             {"type": "mood", "name": "happy", "params": {}, "position": 0},
             {"type": "head", "name": "nod", "params": {}, "position": 14},
             {"type": "eye", "name": "wink", "params": {}, "position": 28}
+        ]
+    }
+
+Movement Example:
+    Input:  "[move:left] Let me show you this! [zoom:in] Check it out!"
+    Output: {
+        "clean_text": "Let me show you this! Check it out!",
+        "actions": [
+            {"type": "move", "name": "left", "params": {}, "position": 0},
+            {"type": "zoom", "name": "in", "params": {}, "position": 22}
         ]
     }
 """
@@ -131,6 +146,41 @@ class ActionParser:
             return ""
         result = self.TAG_PATTERN.sub('', text)
         return re.sub(r'\s+', ' ', result).strip()
+
+    # Movement action types
+    MOVEMENT_TYPES = {"move", "zoom", "body"}
+
+    # Valid movement values
+    MOVEMENT_VALUES = {
+        "move": {"up", "down", "left", "right"},
+        "zoom": {"in", "out", "normal"},
+        "body": {"left", "right", "front"}
+    }
+
+    def is_movement_action(self, action_type: str) -> bool:
+        """Check if action type is a movement command."""
+        return action_type.lower() in self.MOVEMENT_TYPES
+
+    def categorize_actions(self, actions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Categorize parsed actions into groups.
+
+        Returns:
+            Dict with keys: 'animations' (mood/gesture), 'movements' (move/zoom/body)
+        """
+        result = {
+            "animations": [],
+            "movements": []
+        }
+
+        for action in actions:
+            action_type = action.get("type", "").lower()
+            if self.is_movement_action(action_type):
+                result["movements"].append(action)
+            else:
+                result["animations"].append(action)
+
+        return result
 
     def parse_with_timing(self, text: str, ms_per_char: int = 60) -> Dict[str, Any]:
         """

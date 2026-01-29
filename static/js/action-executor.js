@@ -69,6 +69,9 @@ class ActionExecutor {
         // Global intensity multiplier (1.0 = normal, higher = stronger movements)
         this.globalIntensity = 1.0;
 
+        // Navigation callback (called when nav gestures complete)
+        this.onNavigationTrigger = null;
+
         // Initialize with neutral mood
         this._initNeutralMood();
     }
@@ -309,7 +312,8 @@ class ActionExecutor {
             startTime: performance.now(),
             currentValues: {},  // Current interpolated values
             usesArmB,
-            usesArmA
+            usesArmA,
+            triggerNavigation: gesture.triggerNavigation || null  // 'next', 'back', or null
         };
 
         // Add to active gestures
@@ -644,7 +648,15 @@ class ActionExecutor {
         // Remove completed gestures (reverse order to preserve indices)
         for (let i = completedIndices.length - 1; i >= 0; i--) {
             const idx = completedIndices[i];
-            console.log(`[ActionExecutor] Gesture complete: ${this.activeGestures[idx].name}`);
+            const completedGesture = this.activeGestures[idx];
+            console.log(`[ActionExecutor] Gesture complete: ${completedGesture.name}`);
+
+            // Fire navigation trigger if this was a nav gesture
+            if (completedGesture.triggerNavigation && this.onNavigationTrigger) {
+                console.log(`[ActionExecutor] Navigation trigger: ${completedGesture.triggerNavigation}`);
+                this.onNavigationTrigger(completedGesture.triggerNavigation);
+            }
+
             this.activeGestures.splice(idx, 1);
         }
     }

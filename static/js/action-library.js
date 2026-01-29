@@ -1162,6 +1162,35 @@ const ACTION_LIBRARY = {
             ],
             duration: 1200,
             relative: true
+        },
+
+        // === NAVIGATION GESTURES ===
+        // Point right + look right - triggers "next" navigation
+        nav_next: {
+            keyframes: [
+                { t: 0.0, armRB: -1, armRA: -1, angleX: 0, eyeBallX: 0 },
+                { t: 0.2, armRB: 3, armRA: -1, angleX: 15, eyeBallX: 0.5 },
+                { t: 0.5, armRB: 3.5, armRA: -1, angleX: 18, eyeBallX: 0.6 },
+                { t: 0.7, armRB: 3, armRA: -1, angleX: 15, eyeBallX: 0.5 },
+                { t: 1.0, armRB: -1, armRA: -1, angleX: 0, eyeBallX: 0 }
+            ],
+            duration: 1200,
+            relative: false,
+            triggerNavigation: 'next'  // Triggers navigation event on completion
+        },
+
+        // Point left + look left - triggers "back" navigation
+        nav_back: {
+            keyframes: [
+                { t: 0.0, armLB: -1, armLA: -1, angleX: 0, eyeBallX: 0 },
+                { t: 0.2, armLB: 3, armLA: -1, angleX: -15, eyeBallX: -0.5 },
+                { t: 0.5, armLB: 3.5, armLA: -1, angleX: -18, eyeBallX: -0.6 },
+                { t: 0.7, armLB: 3, armLA: -1, angleX: -15, eyeBallX: -0.5 },
+                { t: 1.0, armLB: -1, armLA: -1, angleX: 0, eyeBallX: 0 }
+            ],
+            duration: 1200,
+            relative: false,
+            triggerNavigation: 'back'  // Triggers navigation event on completion
         }
     },
 
@@ -1258,6 +1287,29 @@ const ACTION_LIBRARY = {
     },
 
     // ============================================
+    // GESTURE - Direct gesture aliases for LLM
+    // Usage: [gesture:nav_next], [gesture:wave]
+    // ============================================
+    gesture: {
+        // Navigation gestures
+        nav_next: 'nav_next',
+        nav_back: 'nav_back',
+        next: 'nav_next',
+        back: 'nav_back',
+        // Common gestures
+        nod: 'nod',
+        shake: 'shake',
+        wave: 'wave',
+        wink: 'wink',
+        thumbs_up: 'thumbs_up',
+        clap: 'clap',
+        shrug: 'shrug',
+        think: 'think_hand',
+        present: 'present',
+        point: 'point'
+    },
+
+    // ============================================
     // ACTIONS - Compound mood + gesture combinations
     // ============================================
     actions: {
@@ -1328,11 +1380,19 @@ class ActionLibrary {
             case 'eye':
             case 'head':
             case 'body':
-            case 'brow': {
+            case 'brow':
+            case 'gesture': {
                 const aliasMap = this.library[lowerType];
                 if (aliasMap && aliasMap[lowerName]) {
                     const gestureName = aliasMap[lowerName];
                     return { type: 'gesture', data: this.getGesture(gestureName), name: gestureName, originalType: lowerType };
+                }
+                // For 'gesture' type, also try direct lookup in gestures
+                if (lowerType === 'gesture') {
+                    const directGesture = this.getGesture(lowerName);
+                    if (directGesture) {
+                        return { type: 'gesture', data: directGesture, name: lowerName, originalType: lowerType };
+                    }
                 }
                 return null;
             }

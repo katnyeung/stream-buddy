@@ -158,24 +158,31 @@
         }
 
         .buddy-section.pending {
-            background: rgba(0, 212, 255, 0.15);
-            border-bottom: 2px solid rgba(0, 212, 255, 0.5);
+            background: rgba(255, 165, 2, 0.25);
+            border-bottom: 3px solid #ffa502;
+            box-shadow: 0 0 20px rgba(255, 165, 2, 0.3);
+            animation: pendingGlow 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pendingGlow {
+            0%, 100% { box-shadow: 0 0 20px rgba(255, 165, 2, 0.3); }
+            50% { box-shadow: 0 0 35px rgba(255, 165, 2, 0.6); }
         }
 
         .buddy-section.pending .buddy-text {
-            color: #00d4ff;
+            color: #ffcc66;
         }
 
         .pending-indicator {
             display: inline-block;
-            background: #00d4ff;
+            background: #ffa502;
             color: #1a1a2e;
-            padding: 4px 12px;
+            padding: 6px 14px;
             border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 600;
+            font-size: 0.9rem;
+            font-weight: 700;
             margin-left: 10px;
-            animation: pendingPulse 1.5s ease-in-out infinite;
+            animation: pendingPulse 0.8s ease-in-out infinite;
         }
 
         @keyframes pendingPulse {
@@ -298,6 +305,53 @@
         .setting-card select:focus {
             outline: none;
             border-color: #00d4ff;
+        }
+
+        /* Toggle switch styles */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #444;
+            transition: 0.3s;
+            border-radius: 26px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #ccc;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: #00d4ff;
+        }
+
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+            background-color: #fff;
         }
 
         .setting-hint {
@@ -897,6 +951,14 @@ Example:
                         <option value="balanced" selected>Balanced - Key points</option>
                         <option value="passive">Passive - Only when asked</option>
                     </select>
+                </div>
+
+                <div class="setting-card">
+                    <label for="proactive-toggle">Proactive Mode</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="proactive-toggle">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
 
                 <div class="setting-card">

@@ -608,6 +608,31 @@ GESTURES: Dict[str, GestureDefinition] = {
         ],
         duration_ms=1200, relative=True
     ),
+
+    # === NAVIGATION GESTURES ===
+    # Used for section navigation - triggers navigation event on completion
+    "nav_next": GestureDefinition(
+        name="nav_next",
+        keyframes=[
+            _kf(0.0, armRB=-1, armRA=-1, angleX=0, eyeBallX=0),
+            _kf(0.2, armRB=3, armRA=-1, angleX=15, eyeBallX=0.5),
+            _kf(0.5, armRB=3.5, armRA=-1, angleX=18, eyeBallX=0.6),
+            _kf(0.7, armRB=3, armRA=-1, angleX=15, eyeBallX=0.5),
+            _kf(1.0, armRB=-1, armRA=-1, angleX=0, eyeBallX=0)
+        ],
+        duration_ms=1200, relative=False
+    ),
+    "nav_back": GestureDefinition(
+        name="nav_back",
+        keyframes=[
+            _kf(0.0, armLB=-1, armLA=-1, angleX=0, eyeBallX=0),
+            _kf(0.2, armLB=3, armLA=-1, angleX=-15, eyeBallX=-0.5),
+            _kf(0.5, armLB=3.5, armLA=-1, angleX=-18, eyeBallX=-0.6),
+            _kf(0.7, armLB=3, armLA=-1, angleX=-15, eyeBallX=-0.5),
+            _kf(1.0, armLB=-1, armLA=-1, angleX=0, eyeBallX=0)
+        ],
+        duration_ms=1200, relative=False
+    ),
 }
 
 
@@ -641,6 +666,15 @@ GESTURE_ALIASES: Dict[str, Dict[str, str]] = {
         "raise": "raise_brows", "raise_both": "raise_brows",
         "raise_left": "raise_brow_left", "raise_right": "raise_brow_right",
         "furrow": "furrow_brows", "frown": "furrow_brows"
+    },
+    "gesture": {
+        # Navigation gestures
+        "nav_next": "nav_next", "nav_back": "nav_back",
+        "next": "nav_next", "back": "nav_back",
+        # Common gestures
+        "nod": "nod", "shake": "shake", "wave": "wave",
+        "wink": "wink", "thumbs_up": "thumbs_up", "clap": "clap",
+        "shrug": "shrug", "think": "think_hand", "present": "present", "point": "point"
     },
 }
 

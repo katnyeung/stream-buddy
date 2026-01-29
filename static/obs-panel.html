@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Buddy - Control Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            padding: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Setup panel */
+        .setup-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transition: all 0.3s ease;
+        }
+
+        .setup-panel.hidden {
+            display: none;
+        }
+
+        .setup-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .setup-header h1 {
+            color: #00d4ff;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .setup-header .subtitle {
+            color: #888;
+            font-size: 1.1rem;
+        }
+
+        .setup-header .obs-badge {
+            display: inline-block;
+            background: #ff6b6b;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .script-input-container {
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .script-input-container label {
+            display: block;
+            margin-bottom: 10px;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .script-textarea {
+            width: 100%;
+            height: 200px;
+            background: #16213e;
+            border: 2px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            color: #eee;
+            font-size: 1rem;
+            font-family: inherit;
+            resize: vertical;
+            margin-bottom: 20px;
+        }
+
+        .script-textarea:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .script-textarea::placeholder { color: #555; }
+
+        /* Settings Grid */
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        @media (max-width: 768px) {
+            .settings-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        .setting-card {
+            background: rgba(22, 33, 62, 0.8);
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 15px;
+            transition: border-color 0.2s;
+        }
+
+        .setting-card:hover { border-color: #00d4ff; }
+
+        .setting-card label {
+            display: block;
+            color: #00d4ff;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .setting-card select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .setting-card select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        /* Toggle switch styles */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #444;
+            transition: 0.3s;
+            border-radius: 26px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #ccc;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: #00d4ff;
+        }
+
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+            background-color: #fff;
+        }
+
+        .start-btn {
+            padding: 15px 60px;
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.3rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .start-btn:hover {
+            background: #00b8e6;
+            transform: scale(1.02);
+        }
+
+        /* Session active panel */
+        .session-panel {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .session-panel.active {
+            display: flex;
+        }
+
+        /* Top bar - status + controls + position */
+        .top-bar {
+            display: flex;
+            align-items: stretch;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 12px 20px;
+            border-radius: 12px;
+            flex: 1;
+            min-width: 300px;
+        }
+
+        .status-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff6b6b;
+            flex-shrink: 0;
+        }
+
+        .status-dot.connected { background: #51cf66; }
+        .status-dot.speaking { background: #00d4ff; animation: pulse 1s infinite; }
+        .status-dot.pending { background: #ffa502; animation: pulse 0.5s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-text {
+            font-size: 0.9rem;
+            color: #ccc;
+        }
+
+        .session-id {
+            font-family: monospace;
+            color: #74c0fc;
+            font-size: 0.8rem;
+        }
+
+        .status-right {
+            display: flex;
+            gap: 8px;
+        }
+
+        .control-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-stop { background: #ff4757; color: white; }
+        .btn-reset { background: #333; color: #eee; }
+        .btn-stop:hover { background: #ff6b81; }
+        .btn-reset:hover { background: #444; }
+
+        /* Timer section */
+        .timer-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 12px 15px;
+            border-radius: 12px;
+        }
+
+        .timer-display {
+            font-size: 1.4rem;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+            color: #00d4ff;
+            min-width: 70px;
+        }
+
+        .timer-display.running { color: #2ed573; }
+
+        .timer-btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .timer-btn.start { background: #2ed573; color: #1a1a2e; }
+        .timer-btn.pause { background: #ffa502; color: #1a1a2e; }
+
+        /* Position Controls - Compact */
+        .position-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 8px 12px;
+            border-radius: 12px;
+        }
+
+        .position-controls .label {
+            color: #888;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .pos-btn-group {
+            display: flex;
+            gap: 4px;
+        }
+
+        .pos-btn {
+            width: 32px;
+            height: 32px;
+            background: #16213e;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .pos-btn:hover {
+            background: #1e3a5f;
+            border-color: #00d4ff;
+        }
+
+        .pos-btn:active {
+            transform: scale(0.95);
+        }
+
+        .pos-btn.reset {
+            font-size: 0.65rem;
+            width: 40px;
+        }
+
+        .zoom-divider {
+            width: 1px;
+            height: 24px;
+            background: #444;
+            margin: 0 4px;
+        }
+
+        /* Progress bar */
+        .progress-section {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 12px 20px;
+            border-radius: 12px;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #333;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        /* Main content grid */
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            flex: 1;
+        }
+
+        @media (max-width: 1000px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Sections panel - Large with full content */
+        .sections-panel {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 12px;
+            padding: 15px;
+            overflow-y: auto;
+            max-height: 500px;
+        }
+
+        .sections-panel h3 {
+            color: #00d4ff;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+        }
+
+        .sections-list {
+            list-style: none;
+        }
+
+        .section-item {
+            padding: 12px 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            background: rgba(30, 40, 60, 0.6);
+            border-left: 4px solid #444;
+            font-size: 1rem;
+            color: #ccc;
+            transition: all 0.3s ease;
+        }
+
+        .section-item.current {
+            background: rgba(255, 200, 50, 0.15);
+            border-left-color: #ffc832;
+            color: #fff;
+            font-weight: 600;
+            box-shadow: 0 0 15px rgba(255, 200, 50, 0.3);
+        }
+
+        .section-item.completed {
+            background: rgba(0, 255, 136, 0.1);
+            border-left-color: #00ff88;
+            color: #aaa;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+        }
+
+        .section-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.15);
+            margin-right: 10px;
+            font-size: 0.8rem;
+            flex-shrink: 0;
+        }
+
+        .section-item.current .section-number {
+            background: #ffc832;
+            color: #1a1a2e;
+            font-weight: 700;
+        }
+
+        .section-item.completed .section-number {
+            background: #00ff88;
+            color: #1a1a2e;
+        }
+
+        .section-title {
+            font-weight: 600;
+        }
+
+        .section-points {
+            margin-top: 8px;
+            padding-left: 34px;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .section-points span {
+            display: block;
+            color: #999;
+            margin-bottom: 4px;
+        }
+
+        .section-points span::before {
+            content: "• ";
+            color: #666;
+        }
+
+        .section-item.current .section-points span {
+            color: #ffe599;
+        }
+
+        .section-item.completed .section-points span {
+            color: #888;
+        }
+
+        /* Conversation panel */
+        .conversation-panel {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 12px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            max-height: 500px;
+        }
+
+        .conversation-panel h3 {
+            color: #00d4ff;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+        }
+
+        .conversation-list {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .conversation-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .conversation-item.user {
+            background: rgba(0, 212, 255, 0.1);
+            border-left: 3px solid #00d4ff;
+            color: #b8e6ff;
+        }
+
+        .conversation-item.buddy {
+            background: rgba(255, 165, 2, 0.1);
+            border-left: 3px solid #ffa502;
+            color: #ffe0a3;
+        }
+
+        .conversation-item .speaker {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+            opacity: 0.7;
+        }
+
+        .conversation-item.user .speaker { color: #00d4ff; }
+        .conversation-item.buddy .speaker { color: #ffa502; }
+        .conversation-item.system .speaker { color: #51cf66; }
+
+        .conversation-item.system {
+            background: rgba(81, 207, 102, 0.1);
+            border-left: 3px solid #51cf66;
+            color: #b8ffc2;
+            font-style: italic;
+        }
+
+        /* Pending response display */
+        .pending-response {
+            display: none;
+            background: rgba(255, 165, 2, 0.2);
+            border: 3px solid #ffa502;
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 0 20px rgba(255, 165, 2, 0.3);
+        }
+
+        .pending-response.active {
+            display: block;
+            animation: pendingGlow 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pendingGlow {
+            0%, 100% { box-shadow: 0 0 20px rgba(255, 165, 2, 0.3); }
+            50% { box-shadow: 0 0 35px rgba(255, 165, 2, 0.6); }
+        }
+
+        .pending-response .pending-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .pending-response .pending-label {
+            color: #ffa502;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .pending-response .pending-indicator {
+            display: inline-block;
+            background: #ffa502;
+            color: #1a1a2e;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            animation: pendingPulse 0.8s ease-in-out infinite;
+        }
+
+        @keyframes pendingPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.8; transform: scale(1.08); }
+        }
+
+        .pending-response .pending-text {
+            color: #ffcc66;
+            font-size: 1rem;
+            line-height: 1.5;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+
+        .pending-response .pending-hint {
+            color: #ffa502;
+            font-size: 0.85rem;
+            margin-top: 10px;
+            font-weight: 600;
+        }
+
+        .conversation-item .text {
+            color: #eee;
+        }
+
+        .conversation-item.speaking .text {
+            animation: textPulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes textPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        /* Overlay link */
+        .overlay-link {
+            padding: 12px 15px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid #00d4ff;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .overlay-link h4 {
+            color: #00d4ff;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+
+        .overlay-link code {
+            flex: 1;
+            background: #16213e;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            color: #74c0fc;
+            font-size: 0.85rem;
+            min-width: 200px;
+        }
+
+        .overlay-link small {
+            color: #888;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="main-container" class="main-container">
+        <!-- Setup Panel - Initial state -->
+        <div id="setup-panel" class="setup-panel">
+            <div class="setup-header">
+                <h1>Stream Buddy <span class="obs-badge">Control Panel</span></h1>
+                <p class="subtitle">Configure your session, then add the overlay to OBS</p>
+            </div>
+
+            <div class="script-input-container">
+                <label>Paste your script or talking points:</label>
+                <textarea
+                    id="script-input"
+                    class="script-textarea"
+                    placeholder="Enter your script here...
+
+Example:
+1. Introduction - Welcome viewers
+2. Main Topic - Explain concept
+3. Demo - Show how it works
+4. Q&A - Answer questions
+5. Outro - Thanks and call to action"
+                ></textarea>
+
+                <div class="settings-grid">
+                    <div class="setting-card">
+                        <label for="voice-select">Voice</label>
+                        <select id="voice-select">
+                            <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female)</option>
+                            <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female)</option>
+                            <option value="ErXwobaYiN019PkySvjV">Antoni (Male)</option>
+                            <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male)</option>
+                            <option value="flHkNRp1BlvT73UL6gyz">Aria (Female)</option>
+                            <option value="onwK4e9ZLuTAKqWW03F9">Daniel (Male)</option>
+                            <option value="custom">Custom Voice ID</option>
+                        </select>
+                        <input type="text" id="custom-voice-id" placeholder="Paste ElevenLabs Voice ID" style="display: none; margin-top: 8px; width: 100%; padding: 8px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee; font-size: 0.85rem;">
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="tts-model-select">Quality</label>
+                        <select id="tts-model-select">
+                            <option value="eleven_flash_v2_5" selected>Flash - Fast</option>
+                            <option value="eleven_turbo_v2_5">Turbo - Balanced</option>
+                            <option value="eleven_multilingual_v2">Premium - Expressive</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="style-select">Engagement</label>
+                        <select id="style-select">
+                            <option value="aggressive">Aggressive</option>
+                            <option value="balanced" selected>Balanced</option>
+                            <option value="passive">Passive</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="proactive-toggle">Proactive</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="proactive-toggle">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="personality-select">Personality</label>
+                        <select id="personality-select">
+                            <option value="positive">Supportive</option>
+                            <option value="neutral" selected>Neutral</option>
+                            <option value="critical">Skeptical</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="periodic-interval">Transcribe</label>
+                        <select id="periodic-interval">
+                            <option value="0">VAD Only</option>
+                            <option value="5" selected>5 seconds</option>
+                            <option value="10">10 seconds</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="pause-duration">Pause Detection</label>
+                        <select id="pause-duration">
+                            <option value="1500">1.5s (fast)</option>
+                            <option value="2000" selected>2s (default)</option>
+                            <option value="3000">3s (slow)</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="auto-response">Response Mode</label>
+                        <select id="auto-response">
+                            <option value="true" selected>Auto (speaks automatically)</option>
+                            <option value="false">Manual (Space to speak)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="hotkey-hint" style="text-align: center; color: #888; font-size: 0.85rem; margin-bottom: 20px;">
+                    <strong>Hotkeys:</strong> Space=speak | E=complete section | Q=prev section | W=recap | P=stop
+                </div>
+
+                <button id="start-btn" class="start-btn">Start Session</button>
+
+                <!-- OBS URL - Available immediately -->
+                <div id="obs-url-box" style="margin-top: 25px; padding: 15px 20px; background: rgba(255, 165, 2, 0.15); border: 2px solid #ffa502; border-radius: 12px;">
+                    <h4 style="color: #ffa502; margin-bottom: 10px; font-size: 0.95rem;">📺 OBS Browser Source URL (click to copy)</h4>
+                    <code id="obs-url-setup" style="display: block; cursor: pointer; font-size: 1rem; color: #fff; background: rgba(0,0,0,0.3); padding: 12px 15px; border-radius: 8px; word-break: break-all; user-select: all;">http://localhost:8000/obs/overlay</code>
+                    <p style="color: #888; font-size: 0.8rem; margin-top: 10px;">Settings: 1920x1080, 60fps, transparent background</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Session Panel - Active state -->
+        <div id="session-panel" class="session-panel">
+            <!-- Top bar: status, timer, position controls -->
+            <div class="top-bar">
+                <!-- Status bar -->
+                <div class="status-bar">
+                    <div class="status-left">
+                        <span class="status-dot" id="status-dot"></span>
+                        <span class="status-text" id="status-text">Ready</span>
+                        <span class="session-id" id="session-id-display"></span>
+                    </div>
+                    <div class="status-right">
+                        <button id="stop-btn" class="control-btn btn-stop">Stop</button>
+                        <button id="reset-btn" class="control-btn btn-reset">Reset</button>
+                    </div>
+                </div>
+
+                <!-- Timer -->
+                <div class="timer-section">
+                    <div id="timer-display" class="timer-display">00:00</div>
+                    <button id="timer-btn" class="timer-btn start">Start</button>
+                </div>
+
+                <!-- Position Controls - Compact inline -->
+                <div class="position-controls">
+                    <span class="label">Position</span>
+                    <div class="pos-btn-group">
+                        <button class="pos-btn" id="pos-left" title="Move Left">&#9664;</button>
+                        <button class="pos-btn" id="pos-up" title="Move Up">&#9650;</button>
+                        <button class="pos-btn" id="pos-down" title="Move Down">&#9660;</button>
+                        <button class="pos-btn" id="pos-right" title="Move Right">&#9654;</button>
+                        <button class="pos-btn reset" id="pos-reset" title="Reset">Reset</button>
+                    </div>
+                    <div class="zoom-divider"></div>
+                    <span class="label">Zoom</span>
+                    <div class="pos-btn-group">
+                        <button class="pos-btn" id="zoom-out" title="Zoom Out">-</button>
+                        <button class="pos-btn reset" id="zoom-normal" title="Normal">1x</button>
+                        <button class="pos-btn" id="zoom-in" title="Zoom In">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pending Response Display -->
+            <div id="pending-response" class="pending-response">
+                <div class="pending-header">
+                    <span class="pending-label">Response Ready</span>
+                    <span class="pending-indicator">Press SPACE</span>
+                </div>
+                <div id="pending-text" class="pending-text"></div>
+                <div class="pending-hint">Press Space to speak, or P to cancel</div>
+            </div>
+
+            <!-- Progress bar -->
+            <div class="progress-section">
+                <div class="progress-bar">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="section-info">Section 0</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+            </div>
+
+            <!-- Content grid: sections + conversation -->
+            <div class="content-grid">
+                <!-- Sections panel -->
+                <div class="sections-panel">
+                    <h3>Script Outline</h3>
+                    <ul id="sections-list" class="sections-list">
+                        <li class="section-item">No script loaded</li>
+                    </ul>
+                </div>
+
+                <!-- Conversation panel -->
+                <div class="conversation-panel">
+                    <h3>Conversation</h3>
+                    <div id="conversation-list" class="conversation-list">
+                        <!-- Conversation items will be added here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Overlay link -->
+            <div class="overlay-link">
+                <h4>OBS Browser Source URL (click to copy):</h4>
+                <code id="overlay-url" style="cursor: pointer; user-select: all;">http://localhost:8000/obs/overlay</code>
+                <small>1920x1080, transparent background, 60fps</small>
+            </div>
+            <div class="overlay-link" style="margin-top: 10px; background: rgba(255, 165, 2, 0.1); border-color: #ffa502;">
+                <h4 style="color: #ffa502;">Session ID:</h4>
+                <code id="session-id-copy" style="cursor: pointer; font-size: 1.1rem; color: #ffa502;">--waiting--</code>
+                <small>Copy this URL into OBS Browser Source after session starts</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- OBS Panel Logic -->
+    <script src="/static/js/obs-panel.js"></script>
+</body>
+</html>

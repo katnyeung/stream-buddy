@@ -121,13 +121,117 @@ class RandomActionEngine:
         ],
     }
 
-    def tick(self, state: str) -> List[Dict[str, Any]]:
+    # Mood-specific gestures - these ADD to state gestures when mood is active
+    MOOD_GESTURES = {
+        "happy": [
+            ("bounce", 0.15),            # Bouncy movement
+            ("shrug", 0.10),             # Playful shrug
+            ("nod", 0.12),               # Happy nods
+            ("sway", 0.10),              # Swaying
+        ],
+        "excited": [
+            ("bounce", 0.20),            # Very bouncy
+            ("excited_hands", 0.12),     # Excited hand gestures
+            ("nod_fast", 0.15),          # Fast nods
+        ],
+        "thinking": [
+            ("look_away", 0.18),         # Looking away more
+            ("eye_roll", 0.10),          # Thoughtful eye roll
+            ("look_up", 0.15),           # Looking up
+            ("ponder", 0.12),            # Pondering
+            ("tilt_curious", 0.10),      # Curious tilt
+        ],
+        "curious": [
+            ("raise_brows", 0.18),       # Raised eyebrows
+            ("tilt_curious", 0.15),      # Curious head tilt
+            ("lean_in", 0.12),           # Leaning forward
+            ("raise_brow_left", 0.10),   # Single brow raise
+        ],
+        "surprised": [
+            ("raise_brows", 0.20),       # Wide-eyed
+            ("gasp", 0.08),              # Gasp
+            ("lean_back", 0.12),         # Startle back
+        ],
+        "sad": [
+            ("sigh", 0.15),              # Sighing
+            ("look_down", 0.18),         # Looking down
+            ("blink_slow", 0.12),        # Slow blinks
+        ],
+        "skeptical": [
+            ("raise_brow_right", 0.18),  # Skeptical brow
+            ("look_away", 0.15),         # Looking away
+            ("tilt_right", 0.12),        # Skeptical tilt
+        ],
+        "annoyed": [
+            ("eye_roll", 0.15),          # Eye roll
+            ("sigh", 0.12),              # Sighing
+            ("look_away", 0.12),         # Looking away
+            ("furrow_brows", 0.12),      # Furrowed brows
+        ],
+        "amused": [
+            ("laugh", 0.12),             # Light laugh
+            ("tilt", 0.12),              # Amused tilt
+            ("raise_brow_right", 0.10),  # Amused brow
+        ],
+        "confident": [
+            ("nod", 0.15),               # Confident nods
+            ("lean_back", 0.10),         # Relaxed posture
+            ("sway", 0.08),              # Confident sway
+        ],
+        "concerned": [
+            ("furrow_brows", 0.15),      # Worried brows
+            ("tilt", 0.12),              # Concerned tilt
+            ("lean_in", 0.12),           # Leaning in with concern
+        ],
+        "shy": [
+            ("look_away", 0.20),         # Looking away
+            ("glance_left", 0.15),       # Shy glances
+            ("look_down", 0.15),         # Looking down
+        ],
+        "embarrassed": [
+            ("look_away", 0.22),         # Avoiding eye contact
+            ("look_down", 0.18),         # Looking down
+            ("blink_slow", 0.12),        # Slow blinks
+        ],
+        "mischievous": [
+            ("wink", 0.12),              # Playful wink
+            ("tilt", 0.12),              # Mischievous tilt
+            ("raise_brow_right", 0.15),  # Raised brow
+            ("glance_right", 0.10),      # Glancing
+        ],
+        "sleepy": [
+            ("blink_slow", 0.25),        # Slow blinks (frequent)
+            ("look_down", 0.15),         # Droopy
+            ("sigh", 0.10),              # Sleepy sighs
+        ],
+        "friendly": [
+            ("nod", 0.15),               # Friendly nods
+            ("tilt", 0.12),              # Warm tilt
+            ("lean_in", 0.10),           # Friendly lean
+        ],
+        "serious": [
+            ("nod_slow", 0.12),          # Deliberate nods
+            ("furrow_brows", 0.10),      # Serious expression
+        ],
+        "determined": [
+            ("nod", 0.15),               # Determined nods
+            ("lean_in", 0.10),           # Focused lean
+        ],
+        "proud": [
+            ("nod", 0.15),               # Proud nod
+            ("lean_back", 0.12),         # Confident posture
+            ("raise_brows", 0.08),       # Proud brows
+        ],
+    }
+
+    def tick(self, state: str, mood: str = "neutral") -> List[Dict[str, Any]]:
         """
         Generate gesture commands for this tick (called every 2 seconds).
         Browser's ActionExecutor handles smooth 60fps animation.
 
         Args:
             state: Current avatar state (idle, listening, speaking, thinking)
+            mood: Current avatar mood (happy, thinking, curious, etc.)
 
         Returns:
             List of gesture commands to send
@@ -171,9 +275,21 @@ class RandomActionEngine:
                 "intensity": random.uniform(0.7, 1.0)
             })
 
-        # === State-specific random gestures ===
-        gestures = self.STATE_GESTURES.get(state, self.STATE_GESTURES["idle"])
-        for gesture_name, chance in gestures:
+        # === Combine state and mood gestures ===
+        # Get base state gestures
+        all_gestures = list(self.STATE_GESTURES.get(state, self.STATE_GESTURES["idle"]))
+
+        # Add mood-specific gestures with boosted chances
+        mood_lower = mood.lower() if mood else "neutral"
+        if mood_lower in self.MOOD_GESTURES:
+            # Mood gestures get priority - add them with boosted weight
+            mood_gestures = self.MOOD_GESTURES[mood_lower]
+            all_gestures.extend(mood_gestures)
+
+        # Shuffle to randomize which gesture gets picked first
+        random.shuffle(all_gestures)
+
+        for gesture_name, chance in all_gestures:
             # Check cooldown (minimum 3 seconds between same gesture)
             last_time = self.last_gesture_time.get(gesture_name, 0)
             if now - last_time < 3.0:
@@ -271,7 +387,13 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
                 # Forward other commands to browser
                 try:
                     await websocket.send_json(command)
-                    logger.debug(f"[WS Avatar] Forwarded: {cmd_type}")
+                    # Log speech commands at INFO level for debugging
+                    if cmd_type == 'speech':
+                        text_preview = command.get('text', '')[:30]
+                        has_audio = 'yes' if command.get('audio_base64') else 'no'
+                        logger.info(f"[WS Avatar] Forwarded speech to browser: '{text_preview}...' (audio: {has_audio})")
+                    else:
+                        logger.debug(f"[WS Avatar] Forwarded: {cmd_type}")
                 except Exception as e:
                     logger.warning(f"[WS Avatar] Send failed: {e}")
                     break
@@ -284,21 +406,23 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
 
     # Periodic random action task (2fps = 500ms interval)
     async def send_random_actions():
-        """Send random behaviors at 2fps based on current state."""
+        """Send random behaviors at 2fps based on current state and mood."""
         try:
             while connected:
-                # Get current state
+                # Get current state and mood
                 state = await redis.get_state()
                 state_str = state.value if state else "idle"
+                mood = await redis.get_mood()
+                mood_str = mood if mood else "neutral"
 
-                # Generate random actions
-                actions = action_engine.tick(state_str)
+                # Generate random actions (now mood-aware)
+                actions = action_engine.tick(state_str, mood_str)
 
                 # Send each action
                 for action in actions:
                     try:
                         await websocket.send_json(action)
-                        logger.debug(f"[WS Avatar] Random: {action.get('name')}")
+                        logger.debug(f"[WS Avatar] Random: {action.get('name')} (mood: {mood_str})")
                     except Exception as e:
                         logger.warning(f"[WS Avatar] Random action send failed: {e}")
                         return
@@ -349,6 +473,7 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
             "avatar_id": avatar_id,
             "state": current_state["state"],
             "mood": current_state["mood"],
+            "position": current_state.get("position"),
             "idle_running": idle_running
         })
 
@@ -359,13 +484,45 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
                 msg_type = data.get("type", "")
 
                 if msg_type == "lipsync":
-                    # Browser sending lip sync amplitude
+                    # Control panel sending lip sync amplitude - broadcast to overlay
                     amplitude = float(data.get("amplitude", 0))
                     await redis.set_lipsync_amplitude(amplitude)
+                    # Broadcast to all clients (overlay receives this)
+                    await redis.publish_command({
+                        "type": "lipsync",
+                        "amplitude": amplitude
+                    })
+
+                elif msg_type == "lipsync_start":
+                    # Control panel signals speech starting - broadcast to overlay
+                    logger.info(f"[WS Avatar] Lip sync started for '{avatar_id}'")
+                    await redis.publish_command({"type": "lipsync_start"})
+
+                elif msg_type == "lipsync_end":
+                    # Control panel signals speech ended - broadcast to overlay
+                    await redis.publish_command({"type": "lipsync_end"})
+
+                elif msg_type == "display_text":
+                    # Control panel sending text for overlay display
+                    text = data.get("text", "")
+                    await redis.publish_command({
+                        "type": "display_text",
+                        "text": text
+                    })
+
+                elif msg_type == "clear_text":
+                    # Control panel requesting overlay to clear text
+                    await redis.publish_command({"type": "clear_text"})
 
                 elif msg_type == "ready":
-                    # Browser ready for next speech/action
-                    logger.debug(f"[WS Avatar] Browser ready")
+                    # Browser ready for next speech/action (audio queue empty)
+                    logger.info(f"[WS Avatar] Browser ready (speech complete)")
+                    # Broadcast speech_complete so control panel can resume VAD
+                    await redis.publish_command({
+                        "type": "speech_complete"
+                    })
+                    # Also set state back to idle
+                    await redis.set_state(AvatarState.IDLE)
 
                 elif msg_type == "gesture_complete":
                     # Browser finished playing a gesture
@@ -410,6 +567,96 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
                     # Stop the idle processor (called when session ends)
                     await stop_idle_processor()
                     await websocket.send_json({"type": "idle_stopped"})
+
+                elif msg_type == "movement_complete":
+                    # Browser finished movement animation - update position state
+                    position_data = {
+                        "x": data.get("x", 960),
+                        "y": data.get("y", 810),
+                        "zone": data.get("zone", "center"),
+                        "facing": data.get("facing", "right")
+                    }
+                    await redis.set_position(position_data)
+                    logger.debug(f"[WS Avatar] Position updated: {position_data}")
+
+                elif msg_type == "navigation_trigger":
+                    # Browser triggered navigation (from nav gesture)
+                    direction = data.get("direction", "next")
+                    await redis.publish_navigation(direction, source="gesture")
+                    logger.info(f"[WS Avatar] Navigation trigger: {direction}")
+
+                elif msg_type == "move":
+                    # Directional move command - forward via Redis
+                    direction = data.get("direction", "")
+                    duration = data.get("duration", 400)
+                    await redis.publish_command({
+                        "type": "move",
+                        "direction": direction,
+                        "duration": duration
+                    })
+                    logger.info(f"[WS Avatar] Move command: direction={direction}")
+
+                elif msg_type == "move_to":
+                    # Absolute position move - forward via Redis
+                    x = data.get("x", 0.5)
+                    y = data.get("y", 0.65)
+                    duration = data.get("duration", 600)
+                    await redis.publish_command({
+                        "type": "move_to",
+                        "x": x,
+                        "y": y,
+                        "duration": duration
+                    })
+                    logger.info(f"[WS Avatar] Move to: x={x}, y={y}")
+
+                elif msg_type == "zoom":
+                    # Zoom command - forward via Redis
+                    level = data.get("level", "normal")
+                    duration = data.get("duration", 800)
+                    await redis.send_zoom(level, duration)
+                    logger.info(f"[WS Avatar] Zoom command: level={level}")
+
+                elif msg_type == "body":
+                    # Body orientation command - forward via Redis
+                    direction = data.get("direction", "front")
+                    await redis.publish_command({
+                        "type": "body",
+                        "direction": direction
+                    })
+                    logger.info(f"[WS Avatar] Body orientation: direction={direction}")
+
+                elif msg_type == "presentation_command":
+                    # Presentation command from gesture recognition
+                    command = data.get("command", "")
+                    gesture = data.get("gesture", "")
+                    hand = data.get("hand", "")
+
+                    # Forward to Redis for script manager / LLM brain
+                    await redis.publish_command({
+                        "type": "presentation_command",
+                        "command": command,
+                        "gesture": gesture,
+                        "hand": hand
+                    })
+                    logger.info(f"[WS Avatar] Presentation command: {command} (from {gesture})")
+
+                elif msg_type == "position_update":
+                    # Position update from browser (drag/zoom) - broadcast to all clients
+                    position_data = {
+                        "x": data.get("x", 960),
+                        "y": data.get("y", 810),
+                        "scale": data.get("scale", 0.4),
+                    }
+                    # Save to Redis state
+                    await redis.set_position(position_data)
+                    # Broadcast to all connected clients (control panel <-> overlay sync)
+                    await redis.publish_command({
+                        "type": "position_sync",
+                        "x": position_data["x"],
+                        "y": position_data["y"],
+                        "scale": position_data["scale"],
+                    })
+                    logger.debug(f"[WS Avatar] Position broadcast: {position_data}")
 
             except WebSocketDisconnect:
                 break
@@ -502,3 +749,40 @@ async def send_speech(avatar_id: str, text: str, audio_base64: Optional[str] = N
     """Send speech command to an avatar."""
     redis = await get_or_create_redis(avatar_id)
     await redis.send_speech(text, audio_base64)
+
+
+async def send_move(avatar_id: str, direction: str, duration: int = 400) -> None:
+    """Send directional move command to an avatar."""
+    redis = await get_or_create_redis(avatar_id)
+    await redis.send_move(direction, duration)
+
+
+async def send_move_to(avatar_id: str, x: float, y: float, duration: int = 600) -> None:
+    """Send absolute position move command to an avatar."""
+    redis = await get_or_create_redis(avatar_id)
+    await redis.send_move_to(x, y, duration)
+
+
+async def send_zoom(avatar_id: str, level: str, duration: int = 800) -> None:
+    """Send zoom command to an avatar."""
+    redis = await get_or_create_redis(avatar_id)
+    await redis.send_zoom(level, duration)
+
+
+async def send_body_orientation(avatar_id: str, direction: str) -> None:
+    """Send body orientation command to an avatar."""
+    redis = await get_or_create_redis(avatar_id)
+    await redis.send_body_orientation(direction)
+
+
+async def get_position(avatar_id: str) -> Dict[str, Any]:
+    """Get current position state for an avatar."""
+    redis = await get_or_create_redis(avatar_id)
+    return await redis.get_position()
+
+
+async def get_position_context(avatar_id: str) -> str:
+    """Get position context string for LLM prompt."""
+    redis = await get_or_create_redis(avatar_id)
+    position = await redis.get_position()
+    return redis.get_position_context(position)

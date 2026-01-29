@@ -145,11 +145,11 @@ Only return valid JSON, no markdown."""
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",  # or "gemini-2.0-flash-exp" for cheaper
+            model="gemini-2.0-flash",  # Stable model with higher output limits
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=4000
+                max_output_tokens=8192
             )
         )
 
@@ -188,7 +188,7 @@ Only return valid JSON, no markdown."""
         return structure
 
 
-async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False, elapsed_mins: float = 0, target_mins: int = 10, sections_done: list = None, timeline: list = None) -> dict:
+async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False, elapsed_mins: float = 0, target_mins: int = 10, sections_done: list = None, timeline: list = None, proactive: bool = False) -> dict:
     """
     Analyze current transcript and decide co-host action.
 
@@ -222,7 +222,9 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
 
     # Track responses per section for transition logic
     section_response_count = state.get("section_response_count", {})
-    current_section_key = str(max(sections_done)) if sections_done else "0"
+    # Ensure sections_done contains only integers for max() comparison
+    sections_done_int = [int(s) for s in sections_done if str(s).isdigit()] if sections_done else []
+    current_section_key = str(max(sections_done_int)) if sections_done_int else "0"
 
     grok = get_grok_client()
 
@@ -293,6 +295,44 @@ ONLY WAIT if:
 - Less than 4 words total
 
 IMPORTANT: When in doubt, RESPOND with something supportive. It's better to engage than stay silent."""
+
+    # Proactive mode instructions (overlay on any style)
+    proactive_instructions = ""
+    if proactive:
+        proactive_instructions = """
+PROACTIVE MODE: You're the HOST driving the conversation!
+
+YOUR JOB AS HOST:
+- YOU drive the conversation - ask questions, guide topics, keep it moving
+- Acknowledge what they said, then probe deeper or move forward
+- Think like a curious journalist - "tell me more", "why is that", "how does that work"
+
+RESPONSE STRUCTURE (pick ONE pattern per response, VARY them):
+1. PARAPHRASE + QUESTION: "So you're saying [X]. Why do you think that is?"
+2. REACT + PROBE: "Oh interesting! And how does that actually work?"
+3. SUMMARIZE + BRIDGE: "Got it, so [recap]. Now what about [next topic]?"
+4. CHALLENGE + CURIOUS: "But wait, doesn't that mean [implication]? How do you handle that?"
+5. CONFIRM + EXPAND: "Right, and that ties into [related point]. Tell me more about that side."
+
+OPENER VARIETY (rotate these, NEVER repeat same opener twice in a row):
+- "So you're saying..." / "Okay so..." / "Right, so..."
+- "Interesting..." / "Oh wow..." / "Hmm..."
+- "Got it..." / "I see..." / "Makes sense..."
+- "Wait..." / "Hold on..." / "But..."
+- "That's wild..." / "No way..." / "Really?"
+
+BANNED - NEVER START WITH:
+- "Aha" (overused - only use once per 5 responses MAX)
+- "Aha, so you're saying" (this exact phrase is BANNED)
+- Same opener twice in a row
+
+GOOD HOST BEHAVIORS:
+- Ask ONE clear question per response (not multiple)
+- Use their specific words/examples back at them
+- Show genuine curiosity, not just acknowledging
+- Guide to next topic when current one feels complete
+- Keep responses SHORT - 2-3 sentences max
+"""
 
     # Personality-specific instructions
     personality_instructions = ""
@@ -532,14 +572,14 @@ CRITICAL RULES:
 """
 
     # Build timing and coverage context
-    sections_remaining = [i+1 for i in range(total_sections) if (i+1) not in sections_done]
+    sections_remaining = [i+1 for i in range(total_sections) if (i+1) not in sections_done_int]
     time_remaining = max(0, target_mins - elapsed_mins)
-    coverage_pct = (len(sections_done) / total_sections * 100) if total_sections > 0 else 0
+    coverage_pct = (len(sections_done_int) / total_sections * 100) if total_sections > 0 else 0
     time_pct = (elapsed_mins / target_mins * 100) if target_mins > 0 else 0
 
     # Calculate expected section based on time
     expected_section = min(int((time_pct / 100) * total_sections) + 1, total_sections) if total_sections > 0 else 1
-    current_max_section = max(sections_done) if sections_done else 0
+    current_max_section = max(sections_done_int) if sections_done_int else 0
 
     # Determine pacing hint and transition need
     pacing_hint = ""
@@ -610,6 +650,7 @@ STT TOLERANCE (speaker may be non-native, STT makes mistakes):
 
     prompt = f"""You are Buddy, co-host on a tech stream.
 {style_instructions}
+{proactive_instructions}
 {personality_instructions}
 {emotion_instructions}
 {avatar_instructions}
@@ -661,11 +702,17 @@ Example: "[mood:friendly] [head:nod] That's a great point - it really highlights
     if script_summary:
         print(f"[Brain] First section detail: {script_summary[0][:150]}...")
 
+    # Style-specific system prompts
+    if proactive:
+        system_prompt = "You are Buddy, a charismatic TALK SHOW HOST interviewing a guest. Be curious and ask good questions. IMPORTANT: 1) NEVER start with 'Aha' - vary your openers (use 'So...', 'Interesting...', 'Wait...', 'Got it...', 'Oh wow...'). 2) Keep responses SHORT - 2-3 sentences max. 3) Ask ONE clear question per response. 4) Include [mood:X] and [gesture:Y] tags. 5) Respond with valid JSON."
+    else:
+        system_prompt = "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) ONLY discuss topics from the STREAM OUTLINE - never invent random facts. 2) Use the script sections to interpret unclear STT. 3) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text. 4) Respond with valid JSON."
+
     try:
         response = await grok.chat.completions.create(
             model="grok-3-mini",  # Grok 3 Mini - fast responses for real-time co-host
             messages=[
-                {"role": "system", "content": "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) ONLY discuss topics from the STREAM OUTLINE - never invent random facts. 2) Use the script sections to interpret unclear STT. 3) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text. 4) Respond with valid JSON."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,

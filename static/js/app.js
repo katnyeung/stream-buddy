@@ -159,6 +159,7 @@ class StreamBuddy {
         this.scriptInput = document.getElementById('script-input');
         this.voiceSelect = document.getElementById('voice-select');
         this.styleSelect = document.getElementById('style-select');
+        this.proactiveToggle = document.getElementById('proactive-toggle');
         this.personalitySelect = document.getElementById('personality-select');
         this.ttsModelSelect = document.getElementById('tts-model-select');
         this.startBtn = document.getElementById('start-btn');
@@ -169,6 +170,7 @@ class StreamBuddy {
         // Save settings on change
         this.voiceSelect.addEventListener('change', () => this.saveSettings());
         this.styleSelect.addEventListener('change', () => this.saveSettings());
+        if (this.proactiveToggle) this.proactiveToggle.addEventListener('change', () => this.saveSettings());
         this.personalitySelect.addEventListener('change', () => this.saveSettings());
         this.ttsModelSelect.addEventListener('change', () => this.saveSettings());
 
@@ -242,20 +244,53 @@ class StreamBuddy {
             });
         }
 
-        // Hotkey listener for manual response trigger (Space key)
+        // Hotkey listener for manual response trigger (Space key) and section controls
         document.addEventListener('keydown', (e) => {
-            // Only trigger if Space pressed and we have a pending response
-            // Also check we're not typing in an input/textarea
+            // Skip if typing in an input/textarea
+            if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+                return;
+            }
+
+            // Space - Trigger pending response (TTS)
             if (e.code === 'Space' &&
                 this.pendingResponseText &&
-                !this.autoResponseEnabled &&
-                !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+                !this.autoResponseEnabled) {
                 e.preventDefault();
                 this.triggerPendingResponse();
+                return;
+            }
+
+            // P - Stop speaking immediately
+            if (e.code === 'KeyP') {
+                e.preventDefault();
+                this.stopSpeaking();
+                return;
+            }
+
+            // E - Complete current section
+            if (e.code === 'KeyE') {
+                e.preventDefault();
+                this.completeCurrentSection();
+                return;
+            }
+
+            // Q - Go back to previous section
+            if (e.code === 'KeyQ') {
+                e.preventDefault();
+                this.goToPreviousSection();
+                return;
+            }
+
+            // W - Recap current section
+            if (e.code === 'KeyW') {
+                e.preventDefault();
+                this.recapCurrentSection();
+                return;
             }
         });
 
         console.log('[StreamBuddy] Initialized');
+        console.log('[StreamBuddy] Hotkeys: Space=speak, E=complete section, Q=prev section, W=recap, P=stop');
 
         // Initialize avatar (async)
         this.initAvatar();
@@ -281,6 +316,95 @@ class StreamBuddy {
         // Clear pending state
         this.pendingResponseText = null;
         this.buddySection.classList.remove('pending');
+    }
+
+    stopSpeaking() {
+        console.log('[StreamBuddy] Stop speaking (P key)');
+
+        // Stop current audio
+        if (this.currentAudioElement) {
+            this.currentAudioElement.pause();
+            this.currentAudioElement.currentTime = 0;
+            this.currentAudioElement = null;
+        }
+
+        // Clear audio queue
+        this.audioQueue.clear();
+
+        // Cancel scheduled actions
+        this.cancelScheduledActions();
+
+        // Tell backend to stop
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'stop_speaking' }));
+        }
+
+        this.isPlaying = false;
+        this.setStatus('listening', 'Stopped speaking');
+        this.buddyText.classList.remove('speaking');
+        this.buddySection.classList.remove('active');
+        this.resumeVAD();
+
+        // Reset avatar state
+        if (this.avatarEnabled && this.avatarManager) {
+            this.avatarManager.setState('idle');
+        }
+    }
+
+    completeCurrentSection() {
+        if (!this.sections.length) return;
+
+        const sectionNum = this.currentSection + 1; // 1-indexed for backend
+        console.log('[StreamBuddy] Complete section:', sectionNum);
+
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'complete_section',
+                section: sectionNum
+            }));
+        }
+
+        // Update local state
+        this.completedSections.add(this.currentSection);
+        if (this.currentSection < this.sections.length - 1) {
+            this.currentSection++;
+        }
+        this.renderSections();
+    }
+
+    goToPreviousSection() {
+        if (!this.sections.length || this.currentSection === 0) return;
+
+        console.log('[StreamBuddy] Go to previous section');
+
+        // Remove current section from completed
+        this.completedSections.delete(this.currentSection);
+        this.currentSection--;
+        // Also remove previous from completed to make it current
+        this.completedSections.delete(this.currentSection);
+
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'go_to_section',
+                section: this.currentSection + 1  // 1-indexed
+            }));
+        }
+
+        this.renderSections();
+    }
+
+    recapCurrentSection() {
+        if (!this.sections.length) return;
+
+        const section = this.sections[this.currentSection];
+        console.log('[StreamBuddy] Recap section:', section?.title);
+
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'recap_section',
+                section: this.currentSection + 1  // 1-indexed
+            }));
+        }
     }
 
     async initAvatar() {
@@ -387,12 +511,13 @@ class StreamBuddy {
             return;
         }
 
-        // Get selected voice, style, personality, and TTS model
+        // Get selected voice, style, proactive, personality, and TTS model
         this.selectedVoice = this.voiceSelect.value;
         this.selectedStyle = this.styleSelect.value;
+        this.proactiveEnabled = this.proactiveToggle?.checked || false;
         this.selectedPersonality = this.personalitySelect.value;
         this.selectedTtsModel = this.ttsModelSelect.value;
-        console.log('[StreamBuddy] Starting with voice:', this.selectedVoice, 'style:', this.selectedStyle, 'personality:', this.selectedPersonality, 'ttsModel:', this.selectedTtsModel);
+        console.log('[StreamBuddy] Starting with voice:', this.selectedVoice, 'style:', this.selectedStyle, 'proactive:', this.proactiveEnabled, 'personality:', this.selectedPersonality, 'ttsModel:', this.selectedTtsModel);
 
         try {
             this.audioStream = await navigator.mediaDevices.getUserMedia({
@@ -513,12 +638,13 @@ class StreamBuddy {
                     this.avatarManager.connectServer(this.sessionId);
                     console.log(`[StreamBuddy] Avatar connected to session: ${this.sessionId}`);
                 }
-                // Send script, voice, style, personality, and TTS model
+                // Send script, voice, style, proactive, personality, and TTS model
                 this.ws.send(JSON.stringify({
                     type: 'load_script',
                     script: script,
                     voice: this.selectedVoice,
                     style: this.selectedStyle,
+                    proactive: this.proactiveEnabled,
                     personality: this.selectedPersonality,
                     tts_model: this.selectedTtsModel
                 }));
@@ -561,7 +687,10 @@ class StreamBuddy {
             case 'transcript':
                 console.log('[StreamBuddy] Transcript:', msg.text);
                 this.addTranscript('You', msg.text);
-                this.setStatus('listening', 'Listening...');
+                // Don't reset status if there's a pending response waiting
+                if (!this.pendingResponseText) {
+                    this.setStatus('listening', 'Listening...');
+                }
                 break;
 
             case 'show_prompt':
@@ -700,11 +829,14 @@ class StreamBuddy {
                 }
 
                 this.buddyText.innerHTML = `
-                    <span style="color: #00d4ff;">${pendingDisplayText}</span>
+                    <span style="color: #ffcc66;">${pendingDisplayText}</span>
                     <span class="pending-indicator">Press SPACE</span>
                     <span class="hotkey-hint">Response ready - press Space to speak</span>
                 `;
                 this.setStatus('thinking', 'Response ready (Space to speak)');
+
+                // Play notification sound
+                this.playPendingNotification();
                 break;
 
             case 'auto_response_changed':
@@ -1137,6 +1269,9 @@ class StreamBuddy {
                 const settings = JSON.parse(saved);
                 if (settings.voice) this.voiceSelect.value = settings.voice;
                 if (settings.style) this.styleSelect.value = settings.style;
+                if (settings.proactive !== undefined && this.proactiveToggle) {
+                    this.proactiveToggle.checked = settings.proactive;
+                }
                 if (settings.personality) this.personalitySelect.value = settings.personality;
                 if (settings.ttsModel) this.ttsModelSelect.value = settings.ttsModel;
                 console.log('[StreamBuddy] Settings loaded from localStorage');
@@ -1151,6 +1286,7 @@ class StreamBuddy {
             const settings = {
                 voice: this.voiceSelect.value,
                 style: this.styleSelect.value,
+                proactive: this.proactiveToggle?.checked || false,
                 personality: this.personalitySelect.value,
                 ttsModel: this.ttsModelSelect.value
             };
@@ -1158,6 +1294,43 @@ class StreamBuddy {
             console.log('[StreamBuddy] Settings saved');
         } catch (e) {
             console.warn('[StreamBuddy] Failed to save settings:', e);
+        }
+    }
+
+    // Notification sound for pending response
+    playPendingNotification() {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.frequency.value = 800;
+            oscillator.type = 'sine';
+
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+
+            oscillator.start(audioCtx.currentTime);
+            oscillator.stop(audioCtx.currentTime + 0.2);
+
+            // Second beep (higher pitch)
+            setTimeout(() => {
+                const osc2 = audioCtx.createOscillator();
+                const gain2 = audioCtx.createGain();
+                osc2.connect(gain2);
+                gain2.connect(audioCtx.destination);
+                osc2.frequency.value = 1000;
+                osc2.type = 'sine';
+                gain2.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain2.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+                osc2.start(audioCtx.currentTime);
+                osc2.stop(audioCtx.currentTime + 0.15);
+            }, 150);
+        } catch (e) {
+            console.log('[StreamBuddy] Could not play notification sound:', e);
         }
     }
 

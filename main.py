@@ -78,6 +78,19 @@ async def outline():
     return FileResponse(static_path / "outline.html")
 
 
+@app.get("/obs/overlay")
+async def obs_overlay():
+    """Serve the OBS overlay page (1080p transparent avatar only)."""
+    return FileResponse(static_path / "obs-overlay.html")
+
+
+@app.get("/obs/")
+@app.get("/obs")
+async def obs_panel():
+    """Serve the OBS control panel page (settings, status, sections - no avatar)."""
+    return FileResponse(static_path / "obs-panel.html")
+
+
 @app.get("/api/config")
 async def get_config():
     """Get current configuration."""

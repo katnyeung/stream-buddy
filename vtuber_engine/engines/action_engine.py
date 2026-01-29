@@ -27,6 +27,27 @@ from ..models.actions import (
 from ..utils.easing import ease_out_cubic, ease_in_out_quad, lerp
 
 
+def quantize_intensity(intensity: float) -> float:
+    """
+    Quantize intensity to standard values: 0.0, 0.5, or 1.0.
+    This provides more predictable gesture behavior.
+
+    Args:
+        intensity: Raw intensity value (0.0-1.0)
+
+    Returns:
+        Quantized intensity (0.0, 0.5, or 1.0)
+    """
+    if intensity is None:
+        return 1.0
+    if intensity <= 0.25:
+        return 0.0
+    elif intensity <= 0.75:
+        return 0.5
+    else:
+        return 1.0
+
+
 @dataclass
 class ActiveGesture:
     """A gesture currently being animated."""
@@ -267,7 +288,7 @@ class ActionEngine(BaseEngine):
 
         Args:
             mood_name: Name of the mood
-            intensity: Blend intensity (0-1), default 1.0
+            intensity: Blend intensity (0-1), quantized to 0.0, 0.5, or 1.0
             duration_ms: Transition duration, default from mood definition
 
         Returns:
@@ -277,7 +298,8 @@ class ActionEngine(BaseEngine):
         if not mood:
             return False
 
-        intensity = (intensity or 1.0) * self.global_intensity
+        # Quantize intensity to standard values (0.0, 0.5, 1.0)
+        intensity = quantize_intensity(intensity) * self.global_intensity
         duration_sec = (duration_ms or mood.transition_ms) / 1000.0
 
         # Calculate target params with intensity
@@ -314,7 +336,7 @@ class ActionEngine(BaseEngine):
 
         Args:
             gesture_name: Name of the gesture
-            intensity: Animation intensity (0-1), default 1.0
+            intensity: Animation intensity, quantized to 0.0, 0.5, or 1.0
             duration_ms: Override duration, default from gesture definition
 
         Returns:
@@ -324,7 +346,8 @@ class ActionEngine(BaseEngine):
         if not gesture:
             return False
 
-        intensity = (intensity or 1.0) * self.global_intensity
+        # Quantize intensity to standard values (0.0, 0.5, 1.0)
+        intensity = quantize_intensity(intensity) * self.global_intensity
 
         # Create gesture with potentially overridden duration
         definition = gesture
@@ -357,7 +380,7 @@ class ActionEngine(BaseEngine):
 
         Args:
             action_name: Name of the compound action
-            intensity: Intensity for both mood and gesture
+            intensity: Intensity for both mood and gesture (quantized to 0.0, 0.5, 1.0)
 
         Returns:
             True if action was found and executed
@@ -366,11 +389,14 @@ class ActionEngine(BaseEngine):
         if not action:
             return False
 
+        # Quantize intensity once for both mood and gesture
+        quantized = quantize_intensity(intensity)
+
         success = True
         if action.get("mood"):
-            success = self.set_mood(action["mood"], intensity) and success
+            success = self.set_mood(action["mood"], quantized) and success
         if action.get("gesture"):
-            success = self.play_gesture(action["gesture"], intensity) and success
+            success = self.play_gesture(action["gesture"], quantized) and success
 
         return success
 
