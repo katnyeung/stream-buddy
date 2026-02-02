@@ -15,9 +15,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from core.audio_buffer import AudioBuffer
 from core.stt_client import transcribe_audio
-from core.tts_client import text_to_speech
-from core.script_manager import parse_script, analyze_progress, get_current_prompt
-from core.redis_client import clear_session, store_session_state, get_session_state
+from core.tts_client import text_to_speech, text_to_speech_stream, use_streaming
+from core.script_manager import parse_script, analyze_progress, get_current_prompt, match_section_keywords
+from core.redis_client import clear_session, store_session_state, get_session_state, get_script_structure
 
 # VTuber engine integration (optional) - Hybrid architecture
 try:
@@ -40,6 +40,219 @@ def split_into_sentences(text: str) -> list[str]:
     # Split on .!? followed by space or end of string
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
+
+
+async def check_keyword_completion(
+    session_id: str,
+    transcript: str,
+    all_sections_covered: set,
+    threshold: float = 0.5
+) -> tuple[set, list, dict]:
+    """
+    Check if transcript matches section keywords and mark sections as complete.
+
+    Runs BEFORE the brain call to update section progress locally.
+
+    Args:
+        session_id: Session identifier
+        transcript: Accumulated transcript to check
+        all_sections_covered: Current set of completed sections
+        threshold: Match ratio required (default 0.5 = 50%)
+
+    Returns:
+        (updated_sections_covered, newly_completed, match_progress): Updated set, list of newly completed, and match progress dict
+    """
+    structure = await get_script_structure(session_id)
+    if not structure:
+        return all_sections_covered, [], {}
+
+    sections = structure.get("sections", [])
+    newly_completed = []
+    match_progress = {}  # {section_id: {ratio, matched, unmatched, keywords}}
+
+    for section in sections:
+        section_id = section.get("id", 0)
+        section_title = section.get("title", f"Section {section_id}")
+
+        # Get section keywords (handle string or array)
+        section_keywords = section.get("section_keywords", [])
+        if isinstance(section_keywords, str):
+            # LLM returned string instead of array - split it
+            section_keywords = [k.strip() for k in re.split(r'[,\s]+', section_keywords) if k.strip()]
+
+        # Handle case where LLM concatenated keywords into one string like "helloEveryoneToday"
+        # Split on camelCase boundaries and common patterns
+        expanded_keywords = []
+        for kw in section_keywords:
+            if len(kw) > 15:  # Likely concatenated - try to split
+                # Split on camelCase: "helloEveryone" -> ["hello", "Everyone"]
+                parts = re.split(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', kw)
+                # Also split on apostrophe: "I'mtoday" -> ["I'm", "today"] (rough)
+                final_parts = []
+                for p in parts:
+                    if "'" in p and len(p) > 4:
+                        # Split around apostrophe keeping the apostrophe word
+                        apos_parts = re.split(r"(?<=')(?=[a-z])", p)
+                        final_parts.extend(apos_parts)
+                    else:
+                        final_parts.append(p)
+                expanded_keywords.extend([p.lower() for p in final_parts if len(p) >= 2])
+            else:
+                expanded_keywords.append(kw.lower())
+        section_keywords = expanded_keywords if expanded_keywords else section_keywords
+        if not section_keywords:
+            # Fallback: extract words from speech-type key_points
+            for point in section.get("key_points", []):
+                if isinstance(point, dict) and point.get("type") != "action":
+                    text = point.get("text", "")
+                    # Extract significant words (4+ chars)
+                    words = [w.lower() for w in text.split() if len(w) >= 4]
+                    section_keywords.extend(words[:3])
+
+        if not section_keywords:
+            continue
+
+        # Check keyword match (returns 3-tuple now)
+        is_complete, match_ratio, match_details = match_section_keywords(transcript, section_keywords, threshold)
+
+        # Store progress for all sections (even already completed)
+        match_progress[section_id] = {
+            "title": section_title,
+            "ratio": round(match_ratio * 100),  # percentage
+            "matched": match_details["matched"],
+            "unmatched": match_details["unmatched"],
+            "keywords": section_keywords,
+            "complete": section_id in all_sections_covered or is_complete
+        }
+
+        # Skip already completed sections for completion tracking
+        if section_id in all_sections_covered:
+            continue
+
+        if is_complete:
+            all_sections_covered.add(section_id)
+            newly_completed.append(section_id)
+            logging.info(f"[{session_id}] Section {section_id} COMPLETE ({match_ratio:.0%}): matched={match_details['matched']}")
+        else:
+            # Log progress for debugging
+            if match_details["matched"]:
+                logging.info(f"[{session_id}] Section {section_id} progress ({match_ratio:.0%}): matched={match_details['matched']}, need={match_details['unmatched']}")
+
+    return all_sections_covered, newly_completed, match_progress
+
+
+async def process_tts_background(
+    sentences: list[str],
+    voice: str,
+    model: str,
+    websocket,
+    session_id: str,
+    avatar_redis=None,
+):
+    """Process TTS for sentences in background, sending audio as each completes.
+
+    This runs as a background task so the main websocket loop isn't blocked.
+    """
+    try:
+        if avatar_redis:
+            await avatar_redis.set_state(AvatarState.SPEAKING)
+
+        for i, sentence in enumerate(sentences):
+            tts_start = time.time()
+            try:
+                if use_streaming():
+                    chunk_idx = 0
+                    async for audio_base64 in text_to_speech_stream(sentence, voice, model):
+                        chunk_idx += 1
+                        await websocket.send_json({
+                            "type": "cohost_audio_queued",
+                            "text": sentence if chunk_idx == 1 else "",
+                            "audio_base64": audio_base64,
+                            "is_stream_chunk": True,
+                            "chunk_index": chunk_idx
+                        })
+                    logging.info(f"[{session_id}] BG TTS {i+1}/{len(sentences)} streamed in {time.time()-tts_start:.2f}s")
+                else:
+                    audio_base64 = await text_to_speech(sentence, voice, model)
+                    logging.info(f"[{session_id}] BG TTS {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
+                    await websocket.send_json({
+                        "type": "cohost_audio_queued",
+                        "text": sentence,
+                        "audio_base64": audio_base64
+                    })
+            except Exception as e:
+                logging.error(f"[{session_id}] BG TTS error for sentence {i+1}: {e}")
+
+        logging.info(f"[{session_id}] BG TTS complete: {len(sentences)} sentences")
+    except Exception as e:
+        logging.error(f"[{session_id}] BG TTS task error: {e}")
+
+
+async def process_tts_buffered(
+    sentences: list[str],
+    voice: str,
+    model: str,
+    websocket,
+    session_id: str,
+    pending_audio_chunks: list,
+    speak_text: str,
+    result: dict,
+):
+    """Process TTS for sentences and buffer audio, notifying when first chunk is ready.
+
+    This is used in manual mode - audio is buffered until user presses Space.
+    """
+    try:
+        first_chunk_sent = False
+
+        for i, sentence in enumerate(sentences):
+            tts_start = time.time()
+            try:
+                if use_streaming():
+                    chunk_idx = 0
+                    async for audio_base64 in text_to_speech_stream(sentence, voice, model):
+                        chunk_idx += 1
+                        # Buffer the audio chunk
+                        pending_audio_chunks.append({
+                            "text": sentence if chunk_idx == 1 else "",
+                            "audio_base64": audio_base64,
+                            "is_stream_chunk": True,
+                            "chunk_index": chunk_idx
+                        })
+                        # Notify frontend when first chunk is ready
+                        if not first_chunk_sent:
+                            first_chunk_sent = True
+                            await websocket.send_json({
+                                "type": "audio_ready",
+                                "text": speak_text,
+                                "reason": result.get("reason", "")
+                            })
+                            logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for Space")
+                    logging.info(f"[{session_id}] Buffered TTS {i+1}/{len(sentences)} streamed in {time.time()-tts_start:.2f}s")
+                else:
+                    audio_base64 = await text_to_speech(sentence, voice, model)
+                    logging.info(f"[{session_id}] Buffered TTS {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
+                    # Buffer the audio chunk
+                    pending_audio_chunks.append({
+                        "text": sentence,
+                        "audio_base64": audio_base64
+                    })
+                    # Notify frontend when first chunk is ready
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        await websocket.send_json({
+                            "type": "audio_ready",
+                            "text": speak_text,
+                            "reason": result.get("reason", "")
+                        })
+                        logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for Space")
+            except Exception as e:
+                logging.error(f"[{session_id}] Buffered TTS error for sentence {i+1}: {e}")
+
+        logging.info(f"[{session_id}] Buffered TTS complete: {len(sentences)} sentences, {len(pending_audio_chunks)} chunks ready")
+    except Exception as e:
+        logging.error(f"[{session_id}] Buffered TTS task error: {e}")
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -116,13 +329,12 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
     # Manual response mode (hotkey to trigger avatar speech)
     auto_response_enabled = True  # True = auto respond, False = wait for hotkey
     pending_response = None  # Store prepared response waiting for hotkey
+    pending_audio_chunks = []  # Buffered audio chunks for manual mode
+    pending_audio_ready = False  # True when first audio chunk is ready
 
     # Concurrent Brain processing
     brain_task = None  # Background task for Brain processing
     brain_processing = False  # Flag to prevent concurrent brain calls
-
-    # Proactive mode: track if welcome just played (to auto-trigger follow-up)
-    proactive_welcome_played = False
 
     # VTuber Redis backbone for hybrid mode (optional)
     avatar_redis = None
@@ -178,7 +390,9 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                 is_hallucination = len(clean_transcript) < 3 or clean_transcript.replace(".", "").replace(",", "").strip() == ""
 
                                 if transcript and not is_hallucination:
-                                    # Accumulate transcript
+                                    # Accumulate to BOTH transcripts (fix: was missing full_transcript)
+                                    full_transcript += " " + transcript
+                                    full_transcript = full_transcript.strip()
                                     accumulated_transcript += " " + transcript
                                     accumulated_transcript = accumulated_transcript.strip()
 
@@ -250,7 +464,6 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                             logger.info(f"[{session_id}] Avatar idle processor started")
 
                         # Get structure for welcome message
-                        from core.redis_client import get_script_structure
                         structure = await get_script_structure(session_id)
                         total_sections = structure.get("total_sections", 1) if structure else 1
                         title = structure.get("title", "your presentation") if structure else "your presentation"
@@ -269,35 +482,26 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                     point = points[0]
                                     first_section_point = point.get("text", str(point)) if isinstance(point, dict) else str(point)
 
-                            welcome_text = f"[mood:excited] [gesture:wave] Welcome everyone! I'm Buddy, your host today. [head:nod] We're diving into {title}, and I've got {total_sections} great topics lined up. [body:lean_in] Let's kick things off with our first section: {first_section_title}. [gesture:present] So tell me, what's the story here? What should our audience know about this?"
+                            welcome_text = f"[mood:excited] [gesture:wave] Hey everyone! I'm Buddy, your host today. [head:nod] We're covering {title} with {total_sections} topics, starting with {first_section_title}. [gesture:present] So, what should we know about this?"
                         else:
                             welcome_text = f"Hi! I'm Buddy, your AI cohost. We have {target_duration_mins} minutes and {total_sections} sections to cover. Let's make this a great presentation! Go ahead and start whenever you're ready."
 
                         logger.info(f"[{session_id}] Starting presentation, sending welcome")
 
+                        # Show full text to user
                         await websocket.send_json({
                             "type": "cohost_speaking",
                             "text": welcome_text,
                             "reason": "Welcome greeting"
                         })
 
-                        tts_start = time.time()
-                        audio_base64 = await text_to_speech(welcome_text, selected_voice, selected_tts_model)
-                        logger.info(f"[{session_id}] Welcome TTS in {time.time()-tts_start:.2f}s")
-
-                        await websocket.send_json({
-                            "type": "cohost_audio",
-                            "text": welcome_text,
-                            "audio_base64": audio_base64
-                        })
-
-                        # Set avatar to speaking state (lip sync handled by control panel)
-                        if avatar_redis:
-                            await avatar_redis.set_state(AvatarState.SPEAKING)
-
-                        # Mark that welcome was played (for proactive auto-follow-up)
-                        if proactive_mode:
-                            proactive_welcome_played = True
+                        # Split into sentences and process TTS in background (non-blocking)
+                        sentences = split_into_sentences(welcome_text)
+                        logger.info(f"[{session_id}] Welcome: queueing {len(sentences)} sentences for background TTS")
+                        asyncio.create_task(process_tts_background(
+                            sentences, selected_voice, selected_tts_model,
+                            websocket, session_id, avatar_redis
+                        ))
 
                     elif msg_type == "ready_for_audio":
                         is_speaking = False
@@ -308,68 +512,6 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                         # Set avatar to idle state
                         if avatar_redis:
                             await avatar_redis.set_state(AvatarState.IDLE)
-
-                        # Proactive mode: auto-trigger follow-up after welcome
-                        if proactive_mode and proactive_welcome_played and script_loaded:
-                            proactive_welcome_played = False  # Only trigger once
-                            logger.info(f"[{session_id}] Proactive mode: auto-triggering follow-up question")
-
-                            # Short delay then trigger brain with synthetic input
-                            await asyncio.sleep(2.0)  # Brief pause after welcome
-
-                            # Trigger brain with proactive kickoff context
-                            elapsed_mins = (time.time() - session_start_time) / 60 if session_start_time else 0
-                            supports_emotions = selected_tts_model == "eleven_multilingual_v2"
-
-                            result = await analyze_progress(
-                                session_id,
-                                "[Host is ready, waiting for me to lead into the first topic]",
-                                selected_style,
-                                selected_personality,
-                                supports_emotions,
-                                elapsed_mins=elapsed_mins,
-                                target_mins=target_duration_mins,
-                                sections_done=list(all_sections_covered),
-                                timeline=conversation_timeline,
-                                proactive=proactive_mode
-                            )
-
-                            action = result.get("action", "wait")
-                            speak_text = result.get("speak_text", "")
-
-                            if action in ("respond", "enrich") and speak_text:
-                                is_speaking = True
-                                logger.info(f"[{session_id}] Proactive follow-up: '{speak_text[:60]}...'")
-
-                                # Add to timeline
-                                now = time.time()
-                                elapsed_secs = now - session_start_time if session_start_time else 0
-                                conversation_timeline.append({
-                                    "time": format_timestamp(elapsed_secs),
-                                    "speaker": "Buddy",
-                                    "text": speak_text
-                                })
-                                if len(conversation_timeline) > 10:
-                                    conversation_timeline.pop(0)
-
-                                await websocket.send_json({
-                                    "type": "cohost_speaking",
-                                    "text": speak_text,
-                                    "reason": "Proactive mode leading conversation"
-                                })
-
-                                # Split into sentences and queue TTS
-                                sentences = split_into_sentences(speak_text)
-                                if avatar_redis:
-                                    await avatar_redis.set_state(AvatarState.SPEAKING)
-
-                                for i, sentence in enumerate(sentences):
-                                    audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
-                                    await websocket.send_json({
-                                        "type": "cohost_audio_queued",
-                                        "text": sentence,
-                                        "audio_base64": audio_base64
-                                    })
 
                     elif msg_type == "reset":
                         logger.info(f"[{session_id}] Resetting session")
@@ -406,9 +548,9 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                         })
 
                     elif msg_type == "trigger_response":
-                        # Manual hotkey pressed - speak the pending response
-                        if pending_response:
-                            logger.info(f"[{session_id}] Manual trigger - speaking pending response")
+                        # Manual hotkey pressed - release the buffered audio
+                        if pending_response and pending_audio_chunks:
+                            logger.info(f"[{session_id}] Manual trigger - releasing {len(pending_audio_chunks)} buffered audio chunks")
                             is_speaking = True
                             speak_text = pending_response["speak_text"]
                             result = pending_response["result"]
@@ -433,26 +575,25 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                 "reason": result.get("reason", "manual trigger")
                             })
 
-                            # Split into sentences and queue TTS
-                            sentences = split_into_sentences(speak_text)
-                            logger.info(f"[{session_id}] Splitting into {len(sentences)} sentences")
-
-                            # Set avatar to speaking state
+                            # Set avatar state to speaking if VTuber is enabled
                             if avatar_redis:
                                 await avatar_redis.set_state(AvatarState.SPEAKING)
 
-                            for i, sentence in enumerate(sentences):
-                                tts_start = time.time()
-                                audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
-                                logger.info(f"[{session_id}] TTS sentence {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
-
+                            # Send all buffered audio chunks immediately
+                            for chunk in pending_audio_chunks:
                                 await websocket.send_json({
                                     "type": "cohost_audio_queued",
-                                    "text": sentence,
-                                    "audio_base64": audio_base64
+                                    **chunk
                                 })
 
+                            logger.info(f"[{session_id}] Manual trigger: sent {len(pending_audio_chunks)} audio chunks")
+
+                            # Clear pending state
                             pending_response = None
+                            pending_audio_chunks.clear()
+                            pending_audio_ready = False
+                        elif pending_response and not pending_audio_chunks:
+                            logger.info(f"[{session_id}] Manual trigger - audio still processing, please wait")
                         else:
                             logger.info(f"[{session_id}] Manual trigger - no pending response")
 
@@ -461,6 +602,8 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                         logger.info(f"[{session_id}] Stop speaking requested")
                         is_speaking = False
                         pending_response = None
+                        pending_audio_chunks.clear()
+                        pending_audio_ready = False
                         audio_buffer.clear_all()
                         if avatar_redis:
                             await avatar_redis.set_state(AvatarState.IDLE)
@@ -498,7 +641,6 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                     elif msg_type == "recap_section":
                         # Recap current section (W hotkey)
                         section_num = msg.get("section", 1)
-                        from core.redis_client import get_script_structure
                         structure = await get_script_structure(session_id)
                         if structure and structure.get("sections"):
                             sections = structure["sections"]
@@ -601,6 +743,32 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                             accumulated_transcript = ""  # Reset accumulator
                             last_brain_call_time = now
 
+                            # === Check keyword completion BEFORE brain call ===
+                            # This updates section progress locally without LLM
+                            all_sections_covered, newly_completed, match_progress = await check_keyword_completion(
+                                session_id,
+                                full_transcript,  # Use full transcript for better matching
+                                all_sections_covered,
+                                threshold=0.5  # 50% of keywords needed
+                            )
+
+                            # Save keyword_progress to Redis for polling API
+                            state = await get_session_state(session_id) or {}
+                            state["keyword_progress"] = match_progress
+                            state["all_sections_covered"] = list(all_sections_covered)
+                            await store_session_state(session_id, state)
+
+                            # Send match progress to frontend (shows keyword match status)
+                            await websocket.send_json({
+                                "type": "keyword_progress",
+                                "sections_covered": list(all_sections_covered),
+                                "keyword_completed": newly_completed,
+                                "match_progress": match_progress  # {section_id: {ratio, matched, unmatched, keywords}}
+                            })
+
+                            if newly_completed:
+                                logger.info(f"[{session_id}] Keyword completion: sections {newly_completed} marked complete")
+
                             # === Spawn Brain processing as background task ===
                             # Audio capture continues in main loop while Brain runs
                             async def process_brain_background():
@@ -633,12 +801,9 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                     brain_time = time.time() - brain_start
 
                                     action = result.get("action", "wait")
-                                    sections_covered = result.get("sections_covered", [])
+                                    # Note: sections_covered now handled by keyword matching before brain call
 
-                                    # Track sections
-                                    for sec in sections_covered:
-                                        all_sections_covered.add(sec)
-
+                                    # Save state (sections already updated by keyword matching)
                                     state = await get_session_state(session_id) or {}
                                     state["all_sections_covered"] = list(all_sections_covered)
                                     await store_session_state(session_id, state)
@@ -710,40 +875,41 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                                     "reason": result.get("reason", "")
                                                 })
 
-                                                # Split into sentences and queue TTS
+                                                # Split into sentences and process TTS in background (non-blocking)
                                                 sentences = split_into_sentences(speak_text)
-                                                logger.info(f"[{session_id}] Splitting into {len(sentences)} sentences")
-
-                                                # Set avatar to speaking state
-                                                if avatar_redis:
-                                                    await avatar_redis.set_state(AvatarState.SPEAKING)
-
-                                                for i, sentence in enumerate(sentences):
-                                                    tts_start = time.time()
-                                                    audio_base64 = await text_to_speech(sentence, selected_voice, selected_tts_model)
-                                                    logger.info(f"[{session_id}] TTS sentence {i+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
-
-                                                    # Send queued audio chunk
-                                                    await websocket.send_json({
-                                                        "type": "cohost_audio_queued",
-                                                        "text": sentence,
-                                                        "audio_base64": audio_base64
-                                                    })
+                                                logger.info(f"[{session_id}] Brain response: queueing {len(sentences)} sentences for background TTS")
+                                                asyncio.create_task(process_tts_background(
+                                                    sentences, selected_voice, selected_tts_model,
+                                                    websocket, session_id, avatar_redis
+                                                ))
 
                                             else:
-                                                # Manual mode: store response, wait for hotkey
+                                                # Manual mode: start TTS processing but buffer audio
+                                                # Clear any previous pending audio
+                                                pending_audio_chunks.clear()
+                                                pending_audio_ready = False
+
                                                 pending_response = {
                                                     "speak_text": speak_text,
                                                     "result": result
                                                 }
-                                                logger.info(f"[{session_id}] Manual mode - response pending (press hotkey)")
+                                                logger.info(f"[{session_id}] Manual mode - processing TTS in background")
 
-                                                # Notify frontend that response is ready
+                                                # Notify frontend that we're processing (text preview)
                                                 await websocket.send_json({
                                                     "type": "response_pending",
                                                     "text": speak_text,
                                                     "reason": result.get("reason", "")
                                                 })
+
+                                                # Start TTS processing to buffer audio
+                                                # When first chunk is ready, it will send 'audio_ready' message
+                                                sentences = split_into_sentences(speak_text)
+                                                asyncio.create_task(process_tts_buffered(
+                                                    sentences, selected_voice, selected_tts_model,
+                                                    websocket, session_id, pending_audio_chunks,
+                                                    speak_text, result
+                                                ))
 
                                     elif action == "remind":
                                         prompt_text = result.get("prompt_text", "")

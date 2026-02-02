@@ -344,6 +344,21 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
     # Track connection state
     connected = True
 
+    async def safe_send_json(data: dict) -> bool:
+        """Safely send JSON, returning False if connection is lost."""
+        nonlocal connected
+        if not connected:
+            return False
+        try:
+            await websocket.send_json(data)
+            return True
+        except Exception as e:
+            if "not connected" in str(e).lower() or "disconnect" in str(e).lower():
+                logger.debug(f"[WS Avatar] Connection lost during send")
+                connected = False
+                return False
+            raise
+
     # Random action engine for 2fps behaviors
     action_engine = RandomActionEngine()
 
@@ -385,18 +400,15 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
                     continue
 
                 # Forward other commands to browser
-                try:
-                    await websocket.send_json(command)
-                    # Log speech commands at INFO level for debugging
-                    if cmd_type == 'speech':
-                        text_preview = command.get('text', '')[:30]
-                        has_audio = 'yes' if command.get('audio_base64') else 'no'
-                        logger.info(f"[WS Avatar] Forwarded speech to browser: '{text_preview}...' (audio: {has_audio})")
-                    else:
-                        logger.debug(f"[WS Avatar] Forwarded: {cmd_type}")
-                except Exception as e:
-                    logger.warning(f"[WS Avatar] Send failed: {e}")
+                if not await safe_send_json(command):
                     break
+                # Log speech commands at INFO level for debugging
+                if cmd_type == 'speech':
+                    text_preview = command.get('text', '')[:30]
+                    has_audio = 'yes' if command.get('audio_base64') else 'no'
+                    logger.info(f"[WS Avatar] Forwarded speech to browser: '{text_preview}...' (audio: {has_audio})")
+                else:
+                    logger.debug(f"[WS Avatar] Forwarded: {cmd_type}")
 
             await sub_redis.disconnect()
         except asyncio.CancelledError:
@@ -420,12 +432,9 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
 
                 # Send each action
                 for action in actions:
-                    try:
-                        await websocket.send_json(action)
-                        logger.debug(f"[WS Avatar] Random: {action.get('name')} (mood: {mood_str})")
-                    except Exception as e:
-                        logger.warning(f"[WS Avatar] Random action send failed: {e}")
+                    if not await safe_send_json(action):
                         return
+                    logger.debug(f"[WS Avatar] Random: {action.get('name')} (mood: {mood_str})")
 
                 # Wait 2 seconds per tick
                 await asyncio.sleep(2.0)
@@ -468,14 +477,16 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
     try:
         # Send initial state for sync
         current_state = await redis.get_current_state()
-        await websocket.send_json({
+        if not await safe_send_json({
             "type": "init",
             "avatar_id": avatar_id,
             "state": current_state["state"],
             "mood": current_state["mood"],
             "position": current_state.get("position"),
             "idle_running": idle_running
-        })
+        }):
+            logger.warning(f"[WS Avatar] Failed to send init state for '{avatar_id}'")
+            return
 
         # Handle incoming messages from browser
         while True:
@@ -561,12 +572,12 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
                 elif msg_type == "start_idle":
                     # Start the idle processor (called when session starts)
                     await start_idle_processor()
-                    await websocket.send_json({"type": "idle_started"})
+                    await safe_send_json({"type": "idle_started"})
 
                 elif msg_type == "stop_idle":
                     # Stop the idle processor (called when session ends)
                     await stop_idle_processor()
-                    await websocket.send_json({"type": "idle_stopped"})
+                    await safe_send_json({"type": "idle_stopped"})
 
                 elif msg_type == "movement_complete":
                     # Browser finished movement animation - update position state
@@ -663,12 +674,22 @@ async def websocket_avatar(websocket: WebSocket, avatar_id: str):
             except json.JSONDecodeError:
                 logger.warning(f"[WS Avatar] Invalid JSON received")
             except Exception as e:
+                # Suppress noisy "not connected" errors when connection is lost
+                err_str = str(e).lower()
+                if "not connected" in err_str or "disconnect" in err_str or "accept" in err_str:
+                    logger.debug(f"[WS Avatar] Connection lost: {e}")
+                    break
                 logger.error(f"[WS Avatar] Message error: {e}")
 
     except WebSocketDisconnect:
         logger.info(f"[WS Avatar] Client disconnected from avatar '{avatar_id}'")
     except Exception as e:
-        logger.error(f"[WS Avatar] Connection error: {e}")
+        # Suppress noisy connection errors
+        err_str = str(e).lower()
+        if "not connected" in err_str or "disconnect" in err_str or "accept" in err_str:
+            logger.debug(f"[WS Avatar] Connection closed: {e}")
+        else:
+            logger.error(f"[WS Avatar] Connection error: {e}")
     finally:
         connected = False
         idle_running = False
@@ -702,15 +723,25 @@ async def websocket_subscribe(websocket: WebSocket, avatar_id: str):
 
     redis = RedisBackbone(avatar_id)
     await redis.connect()
+    connected = True
 
     try:
         async for command in redis.subscribe_commands():
-            await websocket.send_json(command)
+            if not connected:
+                break
+            try:
+                await websocket.send_json(command)
+            except Exception as e:
+                if "not connected" in str(e).lower() or "disconnect" in str(e).lower():
+                    connected = False
+                    break
+                raise
 
     except WebSocketDisconnect:
         logger.info(f"[WS Avatar Sub] Client unsubscribed from avatar '{avatar_id}'")
     except Exception as e:
-        logger.error(f"[WS Avatar Sub] Error: {e}")
+        if "not connected" not in str(e).lower():
+            logger.error(f"[WS Avatar Sub] Error: {e}")
     finally:
         await redis.disconnect()
 

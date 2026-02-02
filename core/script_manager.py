@@ -14,6 +14,85 @@ def strip_action_tags(text: str) -> str:
     return re.sub(r'\[(?:mood|gesture|action|eye|head|body|brow):\w+(?:,[^\]]+)?\]', '', text).strip()
 
 
+def match_section_keywords(transcript: str, section_keywords: list, threshold: float = 0.5) -> tuple[bool, float, dict]:
+    """
+    Match transcript words against section keywords.
+
+    Args:
+        transcript: The text to check against keywords
+        section_keywords: List of keywords for the section
+        threshold: Match ratio required (default 0.5 = 50%)
+
+    Returns:
+        (is_complete, match_ratio, match_details): Tuple with completion status, ratio, and details
+
+    Scoring:
+        - Exact match (case-insensitive): 1.0 point
+        - Partial/substring match: 0.5 point
+    """
+    if not section_keywords or not transcript:
+        return False, 0.0, {"matched": [], "unmatched": section_keywords, "scores": {}}
+
+    # Normalize transcript: lowercase, extract words
+    transcript_lower = transcript.lower()
+    transcript_words = set(re.findall(r'\b\w+\b', transcript_lower))
+
+    # Score each keyword and track matches
+    total_score = 0.0
+    max_score = len(section_keywords)
+    matched = []
+    unmatched = []
+    scores = {}
+
+    for keyword in section_keywords:
+        keyword_lower = keyword.lower()
+        score = 0.0
+
+        # Exact match (word boundary)
+        if keyword_lower in transcript_words:
+            score = 1.0
+            matched.append(keyword)
+        # Partial/substring match - only for keywords 4+ chars to avoid false positives
+        elif len(keyword_lower) >= 4 and keyword_lower in transcript_lower:
+            score = 0.5
+            matched.append(keyword)
+        # Check if any transcript word contains the keyword (for compound words)
+        # Only if both keyword and word are 4+ chars to avoid "i", "a", "to" matching
+        elif len(keyword_lower) >= 4:
+            for word in transcript_words:
+                if len(word) >= 4:
+                    # keyword in word: e.g., keyword "test" matches word "testing"
+                    if keyword_lower in word:
+                        score = 0.5
+                        matched.append(keyword)
+                        break
+                    # word in keyword: only if keyword isn't too long (avoid concatenated strings)
+                    # Don't match "key" in "keypointtypesspeech..."
+                    if len(keyword_lower) <= 15 and word in keyword_lower:
+                        score = 0.5
+                        matched.append(keyword)
+                        break
+
+        if score == 0:
+            unmatched.append(keyword)
+
+        scores[keyword] = score
+        total_score += score
+
+    match_ratio = total_score / max_score if max_score > 0 else 0.0
+    is_complete = match_ratio >= threshold
+
+    match_details = {
+        "matched": matched,
+        "unmatched": unmatched,
+        "scores": scores,
+        "total_score": total_score,
+        "max_score": max_score
+    }
+
+    return is_complete, match_ratio, match_details
+
+
 def clean_json_response(text: str) -> str:
     """Clean LLM response to extract valid JSON."""
     original = text
@@ -103,26 +182,54 @@ Return a JSON object with this structure:
         {{
             "id": 1,
             "title": "section title",
+            "section_keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
             "key_points": [
                 {{
                     "text": "point description",
                     "type": "speech|action",
-                    "keywords": ["keyword1", "keyword2"],
                     "action_trigger": "gesture:wave" (only if type is action)
                 }}
             ],
-            "suggested_phrases": ["how to start this section"],
             "duration_secs": number (seconds for this section)
         }}
     ],
     "total_sections": number
 }}
 
+SECTION_KEYWORDS (CRITICAL - used for automatic section detection):
+- Extract 4-6 LITERAL words the speaker WILL ACTUALLY SAY in this section
+- Think: "What exact words will come out of their mouth?"
+- Focus on: greetings, topic names, technical terms, key concepts, transition words
+
+GOOD KEYWORDS (literal words they'll speak):
+- "welcome", "hello", "hi" - actual greeting words
+- "today", "presentation", "stream" - words they'll literally say
+- "section", "first", "next" - transition words they'll speak
+- Technical terms from the topic (e.g., "API", "database", "React")
+
+BAD KEYWORDS (meta-descriptions, NOT actual spoken words):
+- "name" - they'll say their actual name like "John", not the word "name"
+- "introduce" - they'll say "I'm" or "let me tell you about", not "introduce"
+- "topic" - they'll say the actual topic name, not the word "topic"
+- "role" - they'll describe their role, not say the word "role"
+- Action words: "wave", "gesture", "trigger"
+
+EXAMPLE:
+Script: "Introduce yourself and welcome viewers"
+BAD: ["introduce", "yourself", "welcome", "viewers"]
+GOOD: ["hello", "everyone", "I'm", "today", "stream", "excited"]
+
+FORMAT CRITICAL: section_keywords MUST be a JSON array with SEPARATE strings:
+CORRECT: ["hello", "everyone", "today", "stream", "excited"]
+WRONG: ["helloeveryonetodaystreamexcited"]
+WRONG: "hello everyone today stream excited"
+Each keyword must be its OWN array element, separated by commas.
+
 KEY POINT TYPES:
-- "speech": Something the speaker would SAY. Extract 2-4 important keywords from the text.
-  Example: {{"text": "Introduce yourself", "type": "speech", "keywords": ["introduce", "yourself", "name"]}}
+- "speech": Something the speaker would SAY.
+  Example: {{"text": "Introduce yourself and your role", "type": "speech"}}
 - "action": Something the AI avatar should DO. Include action_trigger.
-  Example: {{"text": "Trigger wave greeting", "type": "action", "keywords": ["wave", "greeting"], "action_trigger": "gesture:wave"}}
+  Example: {{"text": "Trigger wave greeting", "type": "action", "action_trigger": "gesture:wave"}}
 
 ACTION TRIGGERS (for type: "action"):
 - "gesture:wave" - wave hand
@@ -235,19 +342,29 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
     print(f"[Brain] Script title: {structure.get('title', 'NO TITLE')}, sections: {total_sections}")
     for i, s in enumerate(structure.get("sections", [])):
         section_titles.append(s['title'])
-        points = s.get("key_points", [])[:4]  # Show more points for matching
         covered_mark = "✓" if (i+1) in sections_done else "○"
-        # Add keywords to help matching - handle both dict and string format
-        keywords_list = []
-        for p in points:
-            if isinstance(p, dict):
-                keywords_list.extend(p.get("keywords", []))
-            else:
-                keywords_list.append(p)
-        keywords = ", ".join(keywords_list) if keywords_list else s['title']
+
+        # Use section_keywords (preferred) or fallback to key_points
+        section_keywords = s.get("section_keywords", [])
+        if section_keywords:
+            keywords = ", ".join(section_keywords)
+        else:
+            # Fallback: extract from speech-type key_points only (not action types)
+            points = s.get("key_points", [])[:4]
+            keywords_list = []
+            for p in points:
+                if isinstance(p, dict):
+                    # Skip action-type points - they shouldn't trigger completion
+                    if p.get("type") == "action":
+                        continue
+                    keywords_list.append(p.get("text", "")[:30])
+                else:
+                    keywords_list.append(str(p)[:30])
+            keywords = ", ".join(keywords_list) if keywords_list else s['title']
+
         script_summary.append(f"[{i+1}] {covered_mark} {s['title']}\n    Keywords: {keywords}")
         if i == 0:  # Log first section as sample
-            print(f"[Brain] First section: {s['title']}, points: {points[:2]}")
+            print(f"[Brain] First section: {s['title']}, keywords: {section_keywords[:3] if section_keywords else 'fallback'}")
 
     # Build buddy history string - make it prominent
     buddy_said = ""
@@ -331,7 +448,12 @@ GOOD HOST BEHAVIORS:
 - Use their specific words/examples back at them
 - Show genuine curiosity, not just acknowledging
 - Guide to next topic when current one feels complete
-- Keep responses SHORT - 2-3 sentences max
+
+LENGTH LIMIT (CRITICAL):
+- MAXIMUM 2 sentences total (under 30 words)
+- Format: [brief reaction] + [one question]
+- Example: "Oh cool, that's a neat approach. What made you go that direction?"
+- NEVER write 3+ sentences - this becomes a monologue
 """
 
     # Personality-specific instructions
@@ -691,7 +813,9 @@ BAD EXAMPLES (avoid these):
 - "Great, now let's talk about..." (rushing)
 - "Time to cover the closing!" (annoying)
 
-JSON: {{"action": "respond|enrich|wait", "speak_text": "[mood:X] [gesture:Y] your response with action tags embedded", "sections_covered": [all section numbers touched], "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}
+JSON: {{"action": "respond|enrich|wait", "speak_text": "[mood:X] [gesture:Y] your response with action tags embedded", "pacing_hint": "on track/behind/ahead", "reason": "brief explanation"}}
+
+NOTE: Section completion is handled automatically via keyword detection - you don't need to track sections_covered.
 
 IMPORTANT: speak_text MUST include [mood:X] at the start and [gesture:Y] tags at natural points!
 Example: "[mood:friendly] [head:nod] That's a great point - it really highlights how..." """
@@ -704,7 +828,7 @@ Example: "[mood:friendly] [head:nod] That's a great point - it really highlights
 
     # Style-specific system prompts
     if proactive:
-        system_prompt = "You are Buddy, a charismatic TALK SHOW HOST interviewing a guest. Be curious and ask good questions. IMPORTANT: 1) NEVER start with 'Aha' - vary your openers (use 'So...', 'Interesting...', 'Wait...', 'Got it...', 'Oh wow...'). 2) Keep responses SHORT - 2-3 sentences max. 3) Ask ONE clear question per response. 4) Include [mood:X] and [gesture:Y] tags. 5) Respond with valid JSON."
+        system_prompt = "You are Buddy, a charismatic TALK SHOW HOST interviewing a guest. CRITICAL RULES: 1) MAX 2 sentences (under 30 words) - format: [brief reaction] + [one question]. 2) NEVER start with 'Aha'. 3) Include [mood:X] and [gesture:Y] tags. 4) Respond with valid JSON."
     else:
         system_prompt = "You are Buddy, a supportive AI co-host with a VTuber avatar. CRITICAL: 1) ONLY discuss topics from the STREAM OUTLINE - never invent random facts. 2) Use the script sections to interpret unclear STT. 3) ALWAYS include [mood:X] and [gesture:Y] tags in speak_text. 4) Respond with valid JSON."
 

@@ -3,16 +3,27 @@ Text-to-Speech client using ElevenLabs.
 """
 import os
 import re
+import io
 import base64
+from typing import AsyncIterator
+import httpx
 from elevenlabs import ElevenLabs
 
 client: ElevenLabs | None = None
+http_client: httpx.AsyncClient | None = None
 
 
 def get_client() -> ElevenLabs:
     global client
     if client is None:
-        client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        base_url = os.getenv("ELEVENLABS_BASE_URL")
+        api_key = os.getenv("ELEVENLABS_API_KEY", "not-needed-for-local")
+        if base_url:
+            # Use local Qwen3-TTS API
+            client = ElevenLabs(api_key=api_key, base_url=base_url)
+            print(f"[TTS] Using custom base URL: {base_url}")
+        else:
+            client = ElevenLabs(api_key=api_key)
     return client
 
 
@@ -94,6 +105,8 @@ async def text_to_speech(text: str, voice: str = None, model: str = None) -> str
     client = get_client()
 
     try:
+        # ElevenLabs SDK v2.x: convert() returns an iterator (works for both streaming and non-streaming)
+        # The response is chunked, so it works with local wrappers that return StreamingResponse
         audio_generator = client.text_to_speech.convert(
             text=clean_text,
             voice_id=voice_id,
@@ -137,3 +150,143 @@ def get_voice_id(voice_name: str) -> str:
     }
 
     return VOICE_IDS.get(voice_name, get_default_voice())
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Get or create async HTTP client for streaming."""
+    global http_client
+    if http_client is None or http_client.is_closed:
+        http_client = httpx.AsyncClient(timeout=120.0)
+    return http_client
+
+
+def use_streaming() -> bool:
+    """Check if streaming mode is enabled."""
+    return os.getenv("ELEVENLABS_USE_STREAMING", "false").lower() == "true"
+
+
+async def text_to_speech_stream(
+    text: str,
+    voice: str = None,
+    model: str = None
+) -> AsyncIterator[str]:
+    """
+    Stream text-to-speech audio chunks using PCM streaming.
+
+    Yields base64-encoded audio chunks as they're generated.
+    Only works with local Chatterbox wrapper.
+
+    Args:
+        text: Text to convert to speech
+        voice: Voice ID (default: from env)
+        model: Model ID (ignored for local)
+
+    Yields:
+        Base64 encoded audio chunks (PCM -> WAV wrapped)
+    """
+    if not text or not text.strip():
+        return
+
+    base_url = os.getenv("ELEVENLABS_BASE_URL")
+    if not base_url:
+        # Fall back to non-streaming for real ElevenLabs
+        result = await text_to_speech(text, voice, model)
+        if result:
+            yield result
+        return
+
+    voice_id = voice if voice else get_default_voice()
+    model_id = model if model else get_model()
+
+    print(f"[TTS Stream] Using model: {model_id}")
+
+    # Strip tags
+    clean_text = strip_action_tags(text)
+    if not is_premium_model(model_id):
+        clean_text = strip_all_tags(clean_text)
+        print(f"[TTS Stream] Non-premium model - stripped all tags")
+
+    if not clean_text:
+        return
+
+    # Call the PCM streaming endpoint
+    url = f"{base_url}/v1/text-to-speech/{voice_id}/stream-pcm"
+
+    client = await get_http_client()
+
+    try:
+        # PCM audio parameters (from Chatterbox)
+        sample_rate = 24000
+        channels = 1
+        bits = 16
+
+        pcm_chunks = []
+        chunk_count = 0
+
+        async with client.stream(
+            "POST",
+            url,
+            json={"text": clean_text, "model_id": model_id},
+            timeout=120.0
+        ) as response:
+            if response.status_code != 200:
+                print(f"[TTS Stream] Error: {response.status_code}")
+                # Fall back to non-streaming
+                result = await text_to_speech(text, voice, model)
+                if result:
+                    yield result
+                return
+
+            # Chatterbox generates complete audio for the sentence
+            # Collect all data and yield as one piece (no internal splits = no ghost noise)
+            buffer = b""
+            async for chunk in response.aiter_bytes():
+                buffer += chunk
+
+            if buffer:
+                duration_secs = len(buffer) / (sample_rate * 2)
+                wav_data = pcm_to_wav(buffer, sample_rate, channels, bits)
+                audio_base64 = base64.b64encode(wav_data).decode('utf-8')
+                print(f"[TTS Stream] Complete: {len(buffer)} bytes PCM ({duration_secs:.1f}s)")
+                yield audio_base64
+
+    except Exception as e:
+        import traceback
+        print(f"[TTS Stream] Error: {e}")
+        traceback.print_exc()
+        # Fall back to non-streaming
+        try:
+            result = await text_to_speech(text, voice, model)
+            if result:
+                yield result
+        except Exception as e2:
+            print(f"[TTS Stream] Fallback also failed: {e2}")
+
+
+def pcm_to_wav(pcm_data: bytes, sample_rate: int, channels: int, bits: int) -> bytes:
+    """Convert raw PCM data to WAV format."""
+    import struct
+
+    # WAV header
+    byte_rate = sample_rate * channels * (bits // 8)
+    block_align = channels * (bits // 8)
+    data_size = len(pcm_data)
+
+    wav_header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF',
+        36 + data_size,  # File size - 8
+        b'WAVE',
+        b'fmt ',
+        16,  # Subchunk1 size
+        1,   # Audio format (PCM)
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits,
+        b'data',
+        data_size
+    )
+
+    return wav_header + pcm_data

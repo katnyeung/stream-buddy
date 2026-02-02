@@ -123,6 +123,7 @@ class OBSPanel {
         this.sections = [];
         this.currentSection = 0;
         this.completedSections = new Set();
+        this.matchProgress = {};  // {sectionId: {ratio, matched, unmatched, keywords}}
 
         // Conversation
         this.conversationItems = [];
@@ -321,7 +322,7 @@ class OBSPanel {
         this.setStatus('speaking', 'Speaking...');
     }
 
-    showPendingResponse(text) {
+    showPendingResponse(text, playNotification = true) {
         if (this.pendingResponseEl && this.pendingTextEl) {
             // Strip action tags for display
             let displayText = text;
@@ -331,8 +332,10 @@ class OBSPanel {
             this.pendingTextEl.textContent = displayText;
             this.pendingResponseEl.classList.add('active');
 
-            // Play notification sound
-            this.playPendingNotification();
+            // Play notification sound only when audio is ready
+            if (playNotification) {
+                this.playPendingNotification();
+            }
         }
     }
 
@@ -710,11 +713,19 @@ class OBSPanel {
                 break;
 
             case 'response_pending':
-                // Manual mode - response ready, waiting for Space key
-                console.log('[OBSPanel] Response pending (press Space):', msg.text?.substring(0, 50));
+                // Manual mode - processing TTS in background
+                console.log('[OBSPanel] Response pending (processing TTS):', msg.text?.substring(0, 50));
                 this.pendingResponseText = msg.text;
-                this.setStatus('pending', 'Response ready (Space to speak)');
-                this.showPendingResponse(msg.text);
+                this.setStatus('pending', 'Processing TTS...');
+                this.showPendingResponse(msg.text, false);  // Don't play ding yet
+                break;
+
+            case 'audio_ready':
+                // Manual mode - audio is ready, can press Space now
+                console.log('[OBSPanel] Audio ready (press Space):', msg.text?.substring(0, 50));
+                this.pendingResponseText = msg.text;
+                this.setStatus('pending', 'Audio ready (Space to speak)');
+                this.showPendingResponse(msg.text, true);  // Play ding now
                 break;
 
             case 'transcript':
@@ -729,6 +740,17 @@ class OBSPanel {
 
             case 'sections_progress':
                 this.updateSectionProgress(msg.sections_covered);
+                break;
+
+            case 'keyword_progress':
+                // Update keyword match progress
+                if (msg.match_progress) {
+                    this.matchProgress = msg.match_progress;
+                }
+                if (msg.sections_covered) {
+                    this.updateSectionProgress(msg.sections_covered);
+                }
+                this.updateKeywordHighlights();
                 break;
 
             case 'cohost_speaking':
@@ -1020,18 +1042,45 @@ class OBSPanel {
         }
 
         this.sectionsList.innerHTML = this.sections.map((section, i) => {
+            const sectionId = section.id || (i + 1);
             let stateClass = this.completedSections.has(i) ? 'completed' : (i === this.currentSection ? 'current' : 'upcoming');
-            // Use key_points (from backend) - each point has {text, type, keywords}
-            const keyPoints = section.key_points || [];
+
+            // Filter out action-type key_points (only show speech type)
+            const keyPoints = (section.key_points || []).filter(p => {
+                if (typeof p === 'object') {
+                    return p.type !== 'action';
+                }
+                return true;
+            });
             let pointsHtml = keyPoints.length ? `<div class="section-points">${keyPoints.map(p => {
                 const text = typeof p === 'string' ? p : (p.text || '');
                 return `<span>${this.escapeHtml(text)}</span>`;
             }).join('')}</div>` : '';
-            return `<li class="section-item ${stateClass}">
+
+            // Show section keywords with match highlighting
+            // Handle both array and string (in case LLM returns wrong format)
+            let keywords = section.section_keywords || [];
+            if (typeof keywords === 'string') {
+                keywords = keywords.split(/[,\s]+/).filter(k => k.length > 0);
+            }
+            const keywordsHtml = keywords.length > 0
+                ? `<div class="section-keywords" data-section-id="${sectionId}">
+                    <span class="keywords-label">Keywords:</span>
+                    ${keywords.map(k => `<span class="keyword" data-keyword="${this.escapeHtml(k)}">${this.escapeHtml(k)}</span>`).join('')}
+                   </div>`
+                : '';
+
+            // Keyword match progress bar
+            const progressHtml = `<div class="keyword-progress-bar" data-section-id="${sectionId}">
+                <div class="keyword-progress-fill" style="width: 0%"></div>
+                <span class="keyword-progress-text">0%</span>
+            </div>`;
+
+            return `<li class="section-item ${stateClass}" data-section-id="${sectionId}">
                 <div class="section-header">
                     <span class="section-number">${i + 1}</span>
                     <span class="section-title">${this.escapeHtml(section.title)}</span>
-                </div>${pointsHtml}
+                </div>${pointsHtml}${keywordsHtml}${progressHtml}
             </li>`;
         }).join('');
 
@@ -1053,6 +1102,47 @@ class OBSPanel {
             if (!this.completedSections.has(i)) { this.currentSection = i; break; }
         }
         this.renderSections();
+        this.updateKeywordHighlights();
+    }
+
+    updateKeywordHighlights() {
+        // Update keyword highlights based on matchProgress
+        for (const [sectionId, progress] of Object.entries(this.matchProgress)) {
+            const container = this.sectionsList.querySelector(`.section-keywords[data-section-id="${sectionId}"]`);
+            if (!container) continue;
+
+            // Highlight matched keywords
+            const matched = new Set((progress.matched || []).map(k => k.toLowerCase()));
+            container.querySelectorAll('.keyword').forEach(keywordEl => {
+                const keyword = keywordEl.dataset.keyword.toLowerCase();
+                if (matched.has(keyword)) {
+                    keywordEl.classList.add('matched');
+                } else {
+                    keywordEl.classList.remove('matched');
+                }
+            });
+
+            // Update progress bar
+            const progressBar = this.sectionsList.querySelector(`.keyword-progress-bar[data-section-id="${sectionId}"]`);
+            if (progressBar) {
+                const ratio = progress.ratio || 0;
+                const fill = progressBar.querySelector('.keyword-progress-fill');
+                const text = progressBar.querySelector('.keyword-progress-text');
+                if (fill) fill.style.width = `${ratio}%`;
+                if (text) text.textContent = `${ratio}%`;
+
+                // Color based on progress
+                if (progress.complete) {
+                    progressBar.classList.add('complete');
+                    progressBar.classList.remove('good');
+                } else if (ratio >= 50) {
+                    progressBar.classList.add('good');
+                    progressBar.classList.remove('complete');
+                } else {
+                    progressBar.classList.remove('good', 'complete');
+                }
+            }
+        }
     }
 
     // Timer

@@ -1,4 +1,8 @@
 /**
+ * DEPRECATED: This file is deprecated in favor of /static/js/obs-panel.js
+ * Use /obs/panel for the control panel and /obs/overlay for OBS browser source.
+ * This file is kept for backwards compatibility but is no longer actively maintained.
+ *
  * Stream Buddy - Frontend Application
  * Continuous streaming with VAD-triggered transcription
  */
@@ -814,11 +818,11 @@ class StreamBuddy {
                 break;
 
             case 'response_pending':
-                // Manual mode: brain has response ready, waiting for hotkey
-                console.log('[StreamBuddy] Response pending (press Space):', msg.text);
+                // Manual mode: brain has response ready, processing TTS in background
+                console.log('[StreamBuddy] Response pending (processing TTS):', msg.text);
                 this.pendingResponseText = msg.text;
 
-                // Show pending indicator
+                // Show processing indicator (audio not ready yet)
                 this.buddySection.classList.add('pending');
                 this.buddySection.classList.remove('active');
 
@@ -829,13 +833,37 @@ class StreamBuddy {
                 }
 
                 this.buddyText.innerHTML = `
-                    <span style="color: #ffcc66;">${pendingDisplayText}</span>
-                    <span class="pending-indicator">Press SPACE</span>
-                    <span class="hotkey-hint">Response ready - press Space to speak</span>
+                    <span style="color: #aaaaaa;">${pendingDisplayText}</span>
+                    <span class="pending-indicator">Processing...</span>
+                    <span class="hotkey-hint">Preparing audio...</span>
                 `;
-                this.setStatus('thinking', 'Response ready (Space to speak)');
+                this.setStatus('thinking', 'Processing TTS...');
+                // Don't play notification yet - wait for audio_ready
+                break;
 
-                // Play notification sound
+            case 'audio_ready':
+                // Manual mode: first audio chunk is ready, can press Space now
+                console.log('[StreamBuddy] Audio ready (press Space):', msg.text);
+                this.pendingResponseText = msg.text;
+
+                // Show ready indicator
+                this.buddySection.classList.add('pending');
+                this.buddySection.classList.remove('active');
+
+                // Strip action tags for display
+                let audioReadyDisplayText = msg.text;
+                if (this.actionParser) {
+                    audioReadyDisplayText = this.actionParser.stripTags(msg.text);
+                }
+
+                this.buddyText.innerHTML = `
+                    <span style="color: #ffcc66;">${audioReadyDisplayText}</span>
+                    <span class="pending-indicator">Press SPACE</span>
+                    <span class="hotkey-hint">Audio ready - press Space to speak</span>
+                `;
+                this.setStatus('thinking', 'Audio ready (Space to speak)');
+
+                // Play notification sound - audio is ready!
                 this.playPendingNotification();
                 break;
 

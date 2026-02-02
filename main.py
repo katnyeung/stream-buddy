@@ -67,7 +67,7 @@ if vtuber_path.exists():
 
 @app.get("/")
 async def root():
-    """Serve the main HTML page."""
+    """DEPRECATED: Use /obs/panel instead. Kept for backwards compatibility."""
     return FileResponse(static_path / "index.html")
 
 
@@ -121,11 +121,13 @@ async def get_session_outline(session_id: str):
 
     # Get covered sections from state (saved by websocket handler)
     sections_covered = state.get("all_sections_covered", []) if state else []
+    keyword_progress = state.get("keyword_progress", {}) if state else {}
 
     return {
         "found": True,
         "structure": structure,
-        "sections_covered": sections_covered
+        "sections_covered": sections_covered,
+        "keyword_progress": keyword_progress
     }
 
 
@@ -145,4 +147,13 @@ async def verify_password(request: PasswordRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Increase websocket ping timeout to handle long TTS streaming
+    # Default is 20s ping interval + 20s timeout = 40s max
+    # TTS can take 30+ seconds, so increase to prevent disconnects
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        ws_ping_interval=60.0,  # Send ping every 60s (default: 20s)
+        ws_ping_timeout=60.0,   # Wait 60s for pong (default: 20s)
+    )

@@ -375,6 +375,13 @@ class OBSStreamBuddy {
                 this.updateSectionProgress(msg.sections_covered);
                 break;
 
+            case 'keyword_progress':
+                // Update section progress from keyword matching
+                if (msg.sections_covered) {
+                    this.updateSectionProgress(msg.sections_covered);
+                }
+                break;
+
             case 'cohost_speaking':
                 console.log('[OBSStreamBuddy] Co-host preparing');
                 let displayText = msg.text;

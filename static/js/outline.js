@@ -17,6 +17,7 @@ class OutlineViewer {
         this.sections = [];
         this.completedSections = new Set();
         this.pollInterval = null;
+        this.matchProgress = {};  // {sectionId: {ratio, matched, unmatched, keywords}}
 
         this.init();
     }
@@ -51,8 +52,8 @@ class OutlineViewer {
         // Fetch immediately
         this.fetchOutline();
 
-        // Poll every 5 seconds (reduce log spam)
-        this.pollInterval = setInterval(() => this.fetchOutline(), 5000);
+        // Poll every 2 seconds for keyword progress updates
+        this.pollInterval = setInterval(() => this.fetchOutline(), 2000);
     }
 
     async fetchOutline() {
@@ -93,6 +94,12 @@ class OutlineViewer {
                 this.updateVisualState();
             }
 
+            // Update keyword match progress
+            if (data.keyword_progress) {
+                this.matchProgress = data.keyword_progress;
+                this.updateKeywordHighlights();
+            }
+
         } catch (error) {
             console.warn('[Outline] Fetch error:', error);
             this.setStatus('error', 'Connection error');
@@ -111,18 +118,60 @@ class OutlineViewer {
         }
 
         this.sectionsList.innerHTML = this.sections.map((section, index) => {
-            const points = section.key_points || [];
+            const sectionId = section.id || (index + 1);
+
+            // Filter out action-type key_points (only show speech type)
+            const points = (section.key_points || []).filter(p => {
+                if (typeof p === 'object') {
+                    return p.type !== 'action';
+                }
+                return true;
+            });
+
+            // Get point text
             const pointsHtml = points.length > 0
-                ? `<div class="section-points">${points.map(p => `<span>• ${this.escapeHtml(p)}</span>`).join('')}</div>`
+                ? `<div class="section-points">${points.map(p => {
+                    const text = typeof p === 'object' ? p.text : p;
+                    return `<span>• ${this.escapeHtml(text)}</span>`;
+                }).join('')}</div>`
                 : '';
 
+            // Show section keywords with match highlighting
+            // Handle both array and string (in case LLM returns wrong format)
+            let keywords = section.section_keywords || [];
+            if (typeof keywords === 'string') {
+                keywords = keywords.split(/[,\s]+/).filter(k => k.length > 0);
+            }
+            // Split concatenated keywords like "helloEveryoneToday" on camelCase
+            keywords = keywords.flatMap(kw => {
+                if (kw.length > 15) {
+                    // Split on camelCase boundaries
+                    return kw.split(/(?<=[a-z])(?=[A-Z])/).filter(k => k.length >= 2);
+                }
+                return [kw];
+            });
+            const keywordsHtml = keywords.length > 0
+                ? `<div class="section-keywords" data-section-id="${sectionId}">
+                    <span class="keywords-label">Keywords:</span>
+                    ${keywords.map(k => `<span class="keyword" data-keyword="${this.escapeHtml(k)}">${this.escapeHtml(k)}</span>`).join('')}
+                   </div>`
+                : '';
+
+            // Keyword match progress bar
+            const progressHtml = `<div class="keyword-progress-bar" data-section-id="${sectionId}">
+                <div class="keyword-progress-fill" style="width: 0%"></div>
+                <span class="keyword-progress-text">0%</span>
+            </div>`;
+
             return `
-                <li class="section-item upcoming" data-index="${index}">
+                <li class="section-item upcoming" data-index="${index}" data-section-id="${sectionId}">
                     <div class="section-header">
                         <span class="section-number">${index + 1}</span>
                         <span class="section-title">${this.escapeHtml(section.title)}</span>
                     </div>
                     ${pointsHtml}
+                    ${keywordsHtml}
+                    ${progressHtml}
                 </li>
             `;
         }).join('');
@@ -135,6 +184,46 @@ class OutlineViewer {
         }
 
         this.updateProgressBar();
+        this.updateKeywordHighlights();
+    }
+
+    updateKeywordHighlights() {
+        // Update keyword highlights based on matchProgress
+        for (const [sectionId, progress] of Object.entries(this.matchProgress)) {
+            const container = this.sectionsList.querySelector(`.section-keywords[data-section-id="${sectionId}"]`);
+            if (!container) continue;
+
+            // Highlight matched keywords
+            const matched = new Set((progress.matched || []).map(k => k.toLowerCase()));
+            container.querySelectorAll('.keyword').forEach(keywordEl => {
+                const keyword = keywordEl.dataset.keyword.toLowerCase();
+                if (matched.has(keyword)) {
+                    keywordEl.classList.add('matched');
+                } else {
+                    keywordEl.classList.remove('matched');
+                }
+            });
+
+            // Update progress bar
+            const progressBar = this.sectionsList.querySelector(`.keyword-progress-bar[data-section-id="${sectionId}"]`);
+            if (progressBar) {
+                const ratio = progress.ratio || 0;
+                const fill = progressBar.querySelector('.keyword-progress-fill');
+                const text = progressBar.querySelector('.keyword-progress-text');
+                if (fill) fill.style.width = `${ratio}%`;
+                if (text) text.textContent = `${ratio}%`;
+
+                // Color based on progress
+                if (progress.complete) {
+                    progressBar.classList.add('complete');
+                } else if (ratio >= 50) {
+                    progressBar.classList.add('good');
+                    progressBar.classList.remove('complete');
+                } else {
+                    progressBar.classList.remove('good', 'complete');
+                }
+            }
+        }
     }
 
     updateVisualState() {
