@@ -18,6 +18,7 @@ class OutlineViewer {
         this.completedSections = new Set();
         this.pollInterval = null;
         this.matchProgress = {};  // {sectionId: {ratio, matched, unmatched, keywords}}
+        this.predictions = {};  // {sectionId: [{keyword, cached, hit_count}]}
 
         this.init();
     }
@@ -100,6 +101,12 @@ class OutlineViewer {
                 this.updateKeywordHighlights();
             }
 
+            // Update prediction cache status
+            if (data.predictions) {
+                this.predictions = data.predictions;
+                this.updatePredictionHighlights();
+            }
+
         } catch (error) {
             console.warn('[Outline] Fetch error:', error);
             this.setStatus('error', 'Connection error');
@@ -163,6 +170,15 @@ class OutlineViewer {
                 <span class="keyword-progress-text">0%</span>
             </div>`;
 
+            // Predicted keywords (if prediction cache enabled)
+            const sectionPredictions = this.predictions[sectionId] || [];
+            const predictionsHtml = sectionPredictions.length > 0
+                ? `<div class="section-predictions" data-section-id="${sectionId}">
+                    <span class="predictions-label">Cached:</span>
+                    ${sectionPredictions.map(p => `<span class="prediction-keyword${p.cached ? ' cached' : ''}" data-keyword="${this.escapeHtml(p.keyword)}">${this.escapeHtml(p.keyword)}</span>`).join('')}
+                   </div>`
+                : '';
+
             return `
                 <li class="section-item upcoming" data-index="${index}" data-section-id="${sectionId}">
                     <div class="section-header">
@@ -172,6 +188,7 @@ class OutlineViewer {
                     ${pointsHtml}
                     ${keywordsHtml}
                     ${progressHtml}
+                    ${predictionsHtml}
                 </li>
             `;
         }).join('');
@@ -185,6 +202,25 @@ class OutlineViewer {
 
         this.updateProgressBar();
         this.updateKeywordHighlights();
+    }
+
+    updatePredictionHighlights() {
+        // Update prediction keyword highlights
+        for (const [sectionId, predictions] of Object.entries(this.predictions)) {
+            const container = this.sectionsList.querySelector(`.section-predictions[data-section-id="${sectionId}"]`);
+            if (!container) continue;
+
+            container.querySelectorAll('.prediction-keyword').forEach(el => {
+                const keyword = el.dataset.keyword.toLowerCase();
+                const pred = predictions.find(p => p.keyword.toLowerCase() === keyword);
+                if (pred?.cached) el.classList.add('cached');
+                if (pred?.hit) {
+                    el.classList.add('hit');
+                    // Remove hit class after animation
+                    setTimeout(() => el.classList.remove('hit'), 500);
+                }
+            });
+        }
     }
 
     updateKeywordHighlights() {

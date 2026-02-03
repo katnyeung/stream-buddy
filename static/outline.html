@@ -264,6 +264,49 @@
             display: none;
         }
 
+        /* Predicted keywords - distinct from section keywords */
+        .section-predictions {
+            margin-top: 8px;
+            margin-left: 40px;
+            padding: 6px 10px;
+            background: rgba(138, 43, 226, 0.1);
+            border-radius: 6px;
+            border-left: 2px solid #8b5cf6;
+        }
+
+        .predictions-label {
+            font-size: 0.7rem;
+            color: #8b5cf6;
+            text-transform: uppercase;
+            margin-right: 8px;
+        }
+
+        .prediction-keyword {
+            display: inline-block;
+            padding: 2px 8px;
+            margin: 2px 4px 2px 0;
+            background: rgba(139, 92, 246, 0.2);
+            border-radius: 12px;
+            font-size: 0.75rem;
+            color: #c4b5fd;
+        }
+
+        .prediction-keyword.cached {
+            background: rgba(139, 92, 246, 0.4);
+            color: #fff;
+        }
+
+        .prediction-keyword.hit {
+            background: #22c55e;
+            color: #fff;
+            animation: hitFlash 0.5s ease;
+        }
+
+        @keyframes hitFlash {
+            0% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+
         .progress-bar {
             padding: 15px 20px;
             background: #16213e;

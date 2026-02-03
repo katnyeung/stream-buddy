@@ -14,10 +14,18 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from core.audio_buffer import AudioBuffer
-from core.stt_client import transcribe_audio
+from core.stt_client import transcribe_audio, apply_stt_corrections
 from core.tts_client import text_to_speech, text_to_speech_stream, use_streaming
 from core.script_manager import parse_script, analyze_progress, get_current_prompt, match_section_keywords
-from core.redis_client import clear_session, store_session_state, get_session_state, get_script_structure
+from core.redis_client import clear_session, store_session_state, get_session_state, get_script_structure, store_prediction_status
+
+# Prediction cache for pre-generated TTS (optional feature)
+try:
+    from core.prediction_cache import PredictionCache
+    PREDICTION_CACHE_AVAILABLE = True
+except ImportError:
+    PREDICTION_CACHE_AVAILABLE = False
+    PredictionCache = None
 
 # VTuber engine integration (optional) - Hybrid architecture
 try:
@@ -200,7 +208,7 @@ async def process_tts_buffered(
 ):
     """Process TTS for sentences and buffer audio, notifying when first chunk is ready.
 
-    This is used in manual mode - audio is buffered until user presses Space.
+    This is used in manual mode - audio is buffered until user presses T.
     """
     try:
         first_chunk_sent = False
@@ -227,7 +235,7 @@ async def process_tts_buffered(
                                 "text": speak_text,
                                 "reason": result.get("reason", "")
                             })
-                            logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for Space")
+                            logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for T")
                     logging.info(f"[{session_id}] Buffered TTS {i+1}/{len(sentences)} streamed in {time.time()-tts_start:.2f}s")
                 else:
                     audio_base64 = await text_to_speech(sentence, voice, model)
@@ -245,7 +253,7 @@ async def process_tts_buffered(
                             "text": speak_text,
                             "reason": result.get("reason", "")
                         })
-                        logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for Space")
+                        logging.info(f"[{session_id}] Manual mode: first audio chunk ready, waiting for T")
             except Exception as e:
                 logging.error(f"[{session_id}] Buffered TTS error for sentence {i+1}: {e}")
 
@@ -335,6 +343,10 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
     # Concurrent Brain processing
     brain_task = None  # Background task for Brain processing
     brain_processing = False  # Flag to prevent concurrent brain calls
+
+    # Prediction cache (optional feature - pre-generated TTS for keywords)
+    prediction_cache = None
+    use_prediction_cache = False
 
     # VTuber Redis backbone for hybrid mode (optional)
     avatar_redis = None
@@ -431,8 +443,9 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                         selected_personality = msg.get("personality", "neutral")  # Get personality
                         selected_tts_model = msg.get("tts_model", "eleven_flash_v2_5")  # Get TTS model
                         proactive_mode = msg.get("proactive", False)  # Proactive mode: buddy leads conversation
+                        use_prediction_cache = msg.get("use_prediction_cache", False)  # Prediction cache feature flag
                         if script_text:
-                            logger.info(f"[{session_id}] Loading script, voice: {selected_voice}, style: {selected_style}, personality: {selected_personality}, tts: {selected_tts_model}, proactive: {proactive_mode}")
+                            logger.info(f"[{session_id}] Loading script, voice: {selected_voice}, style: {selected_style}, personality: {selected_personality}, tts: {selected_tts_model}, proactive: {proactive_mode}, prediction_cache: {use_prediction_cache}")
                             start = time.time()
 
                             structure = await parse_script(session_id, script_text)
@@ -452,62 +465,199 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                 "target_duration": target_duration_mins
                             })
 
+                            # === PROACTIVE MODE: Preload welcome speech for instant playback on Start ===
+                            if proactive_mode:
+                                async def preload_welcome_bg():
+                                    try:
+                                        from core.redis_client import get_redis
+                                        from core.tts_client import text_to_speech
+                                        import re
+
+                                        total_sections = structure.get("total_sections", len(structure.get("sections", [])))
+                                        title = structure.get("title", "your presentation")
+
+                                        first_section_title = ""
+                                        sections = structure.get("sections", [])
+                                        if sections:
+                                            first_section_title = sections[0].get("title", "the first topic")
+
+                                        welcome_text = f"[mood:excited] [gesture:wave] Hey everyone! I'm Buddy, your host today. [head:nod] We're covering {title} with {total_sections} topics, starting with {first_section_title}. [gesture:present] So, what should we know about this?"
+
+                                        # Strip tags for TTS
+                                        clean_welcome = re.sub(r'\[[\w:,]+\]', '', welcome_text).strip()
+
+                                        logger.info(f"[{session_id}] PROACTIVE: Preloading welcome speech TTS...")
+                                        audio_base64 = await text_to_speech(clean_welcome, selected_voice, selected_tts_model)
+
+                                        if audio_base64:
+                                            r = await get_redis()
+                                            cache_key = f"stream:{session_id}:welcome_speech"
+                                            await r.hset(cache_key, mapping={
+                                                "text": welcome_text,
+                                                "audio_base64": audio_base64
+                                            })
+                                            await r.expire(cache_key, 3600)
+                                            logger.info(f"[{session_id}] PROACTIVE: Welcome speech cached (ready for Start)")
+
+                                    except Exception as e:
+                                        logger.error(f"[{session_id}] Failed to preload welcome: {e}")
+
+                                asyncio.create_task(preload_welcome_bg())
+
+                            # Initialize prediction cache if feature enabled
+                            if use_prediction_cache and PREDICTION_CACHE_AVAILABLE:
+                                # Clear any old prediction cache first
+                                from core.redis_client import get_redis
+                                r = await get_redis()
+                                old_keys = await r.keys(f"stream:{session_id}:voice_cache:*")
+                                if old_keys:
+                                    await r.delete(*old_keys)
+                                    logger.info(f"[{session_id}] Cleared {len(old_keys)} old prediction cache entries")
+
+                                prediction_cache = PredictionCache(session_id)
+                                logger.info(f"[{session_id}] Starting prediction cache generation in background...")
+
+                                # Notify frontend that prediction generation is starting
+                                await websocket.send_json({
+                                    "type": "prediction_status",
+                                    "status": "generating",
+                                    "message": "Generating prediction cache..."
+                                })
+
+                                # Generate predictions in background (don't block UI)
+                                async def generate_predictions_bg():
+                                    try:
+                                        result = await prediction_cache.generate_all_predictions(
+                                            structure, selected_voice, selected_tts_model,
+                                            proactive_mode=proactive_mode,
+                                            target_duration_mins=target_duration_mins
+                                        )
+                                        # Store status in Redis for outline page (always save, even if WS closed)
+                                        await store_prediction_status(session_id, {
+                                            "status": "ready",
+                                            "generated": result.get("generated", 0),
+                                            "keywords": result.get("keywords", []),
+                                            "predictions_by_section": prediction_cache.get_predictions_by_section()
+                                        })
+                                        # Notify frontend (only if websocket still open)
+                                        try:
+                                            await websocket.send_json({
+                                                "type": "prediction_status",
+                                                "status": "ready",
+                                                "cached_count": result.get("generated", 0),
+                                                "keywords": result.get("keywords", [])
+                                            })
+                                        except RuntimeError:
+                                            # Websocket already closed - that's ok, data is in Redis
+                                            logger.info(f"[{session_id}] Prediction cache ready (WS closed, saved to Redis)")
+                                    except Exception as e:
+                                        logger.error(f"[{session_id}] Prediction cache generation failed: {e}")
+                                        try:
+                                            await websocket.send_json({
+                                                "type": "prediction_status",
+                                                "status": "error",
+                                                "message": str(e)
+                                            })
+                                        except RuntimeError:
+                                            pass  # Websocket closed, ignore
+
+                                asyncio.create_task(generate_predictions_bg())
+
                     elif msg_type == "start_presentation":
-                        # User clicked start - begin timer and send welcome greeting
+                        # User clicked start - begin timer
                         session_start_time = time.time()
                         all_sections_covered = set()
-                        is_speaking = True
 
                         # Start avatar idle processor
                         if avatar_redis:
                             await avatar_redis.start_idle_processor()
                             logger.info(f"[{session_id}] Avatar idle processor started")
 
-                        # Get structure for welcome message
-                        structure = await get_script_structure(session_id)
-                        total_sections = structure.get("total_sections", 1) if structure else 1
-                        title = structure.get("title", "your presentation") if structure else "your presentation"
-
-                        # Style-aware welcome messages
                         if proactive_mode:
-                            # Get first section details for proactive kickoff
-                            first_section_title = ""
-                            first_section_point = ""
-                            if structure and structure.get("sections"):
-                                first_section = structure["sections"][0]
-                                first_section_title = first_section.get("title", "the first topic")
-                                # Get first key point for context
-                                points = first_section.get("key_points", [])
-                                if points:
-                                    point = points[0]
-                                    first_section_point = point.get("text", str(point)) if isinstance(point, dict) else str(point)
+                            # === PROACTIVE MODE: AI speaks first (reporter style) ===
+                            is_speaking = True
 
-                            welcome_text = f"[mood:excited] [gesture:wave] Hey everyone! I'm Buddy, your host today. [head:nod] We're covering {title} with {total_sections} topics, starting with {first_section_title}. [gesture:present] So, what should we know about this?"
+                            # Try cached welcome first
+                            cached_welcome = None
+                            try:
+                                from core.redis_client import get_redis
+                                r = await get_redis()
+                                cache_key = f"stream:{session_id}:welcome_speech"
+                                data = await r.hgetall(cache_key)
+                                if data and data.get("audio_base64"):
+                                    cached_welcome = {
+                                        "text": data.get("text", ""),
+                                        "audio_base64": data["audio_base64"]
+                                    }
+                            except Exception as e:
+                                logger.warning(f"[{session_id}] Failed to get cached welcome: {e}")
+
+                            if cached_welcome:
+                                # Instant playback from cache!
+                                welcome_text = cached_welcome["text"]
+                                logger.info(f"[{session_id}] PROACTIVE: Playing CACHED welcome (instant)")
+
+                                await websocket.send_json({
+                                    "type": "cohost_speaking",
+                                    "text": welcome_text,
+                                    "reason": "Reporter welcome (cached)",
+                                    "from_cache": True
+                                })
+                                await websocket.send_json({
+                                    "type": "cohost_audio_queued",
+                                    "text": welcome_text,
+                                    "audio_base64": cached_welcome["audio_base64"],
+                                    "from_cache": True
+                                })
+
+                                if avatar_redis:
+                                    await avatar_redis.set_state(AvatarState.SPEAKING)
+                            else:
+                                # Fallback: Generate welcome on-the-fly
+                                structure = await get_script_structure(session_id)
+                                total_sections = structure.get("total_sections", 1) if structure else 1
+                                title = structure.get("title", "your presentation") if structure else "your presentation"
+
+                                first_section_title = ""
+                                if structure and structure.get("sections"):
+                                    first_section = structure["sections"][0]
+                                    first_section_title = first_section.get("title", "the first topic")
+
+                                welcome_text = f"[mood:excited] [gesture:wave] Hey everyone! I'm Buddy, your host today. [head:nod] We're covering {title} with {total_sections} topics, starting with {first_section_title}. [gesture:present] So, what should we know about this?"
+
+                                logger.info(f"[{session_id}] PROACTIVE: Generating welcome TTS (not cached)")
+
+                                await websocket.send_json({
+                                    "type": "cohost_speaking",
+                                    "text": welcome_text,
+                                    "reason": "Reporter welcome"
+                                })
+
+                                sentences = split_into_sentences(welcome_text)
+                                asyncio.create_task(process_tts_background(
+                                    sentences, selected_voice, selected_tts_model,
+                                    websocket, session_id, avatar_redis
+                                ))
                         else:
-                            welcome_text = f"Hi! I'm Buddy, your AI cohost. We have {target_duration_mins} minutes and {total_sections} sections to cover. Let's make this a great presentation! Go ahead and start whenever you're ready."
+                            # === NORMAL MODE: User speaks first, AI responds ===
+                            is_speaking = False
+                            logger.info(f"[{session_id}] NORMAL: Started, listening for user speech")
 
-                        logger.info(f"[{session_id}] Starting presentation, sending welcome")
+                            await websocket.send_json({
+                                "type": "presentation_started",
+                                "message": "Listening... You speak first!"
+                            })
 
-                        # Show full text to user
-                        await websocket.send_json({
-                            "type": "cohost_speaking",
-                            "text": welcome_text,
-                            "reason": "Welcome greeting"
-                        })
-
-                        # Split into sentences and process TTS in background (non-blocking)
-                        sentences = split_into_sentences(welcome_text)
-                        logger.info(f"[{session_id}] Welcome: queueing {len(sentences)} sentences for background TTS")
-                        asyncio.create_task(process_tts_background(
-                            sentences, selected_voice, selected_tts_model,
-                            websocket, session_id, avatar_redis
-                        ))
+                            if avatar_redis:
+                                await avatar_redis.set_state(AvatarState.LISTENING)
 
                     elif msg_type == "ready_for_audio":
                         is_speaking = False
                         # Clear any audio captured during TTS playback (echo)
                         audio_buffer.clear_all()
-                        logger.info(f"[{session_id}] Ready for audio (TTS finished, buffer cleared)")
+                        # Clear accumulated transcript so fresh speech gets checked
+                        accumulated_transcript = ""
+                        logger.info(f"[{session_id}] Ready for audio (TTS finished, buffer+transcript cleared)")
 
                         # Set avatar to idle state
                         if avatar_redis:
@@ -597,6 +747,40 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                         else:
                             logger.info(f"[{session_id}] Manual trigger - no pending response")
 
+                    elif msg_type == "trigger_cached_keyword":
+                        # Keyboard hotkey triggered - play cached keyword response
+                        keyword = data.get("keyword")
+                        if keyword and prediction_cache:
+                            cached = await prediction_cache.get_by_keyword(keyword)
+                            if cached:
+                                logger.info(f"[{session_id}] Hotkey trigger: '{keyword}' -> instant play")
+                                is_speaking = True
+                                audio_buffer.clear_all()
+
+                                await websocket.send_json({
+                                    "type": "cohost_speaking",
+                                    "text": cached["response_text"],
+                                    "reason": f"Hotkey: {keyword}",
+                                    "from_cache": True
+                                })
+                                await websocket.send_json({
+                                    "type": "cohost_audio_queued",
+                                    "text": cached["response_text"],
+                                    "audio_base64": cached["audio_base64"],
+                                    "from_cache": True
+                                })
+                                await websocket.send_json({
+                                    "type": "prediction_hit",
+                                    "keyword": cached["keyword"],
+                                    "section_id": cached.get("section_id", 0)
+                                })
+                                if avatar_redis:
+                                    await avatar_redis.set_state(AvatarState.SPEAKING)
+                            else:
+                                logger.warning(f"[{session_id}] No cache for keyword: {keyword}")
+                        else:
+                            logger.warning(f"[{session_id}] Hotkey trigger without keyword or cache")
+
                     elif msg_type == "stop_speaking":
                         # Stop speaking immediately (P hotkey)
                         logger.info(f"[{session_id}] Stop speaking requested")
@@ -622,6 +806,23 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                 "type": "sections_progress",
                                 "sections_covered": list(all_sections_covered)
                             })
+
+                            # Trigger dynamic prediction for next section
+                            structure = await get_script_structure(session_id)
+                            if prediction_cache and structure:
+                                total_sections = structure.get("total_sections", len(structure.get("sections", [])))
+                                if section_num < total_sections:
+                                    logger.info(f"[{session_id}] Triggering dynamic predictions for section {section_num + 1}")
+                                    asyncio.create_task(
+                                        prediction_cache.generate_dynamic_predictions(
+                                            next_section_id=section_num + 1,
+                                            recent_transcript=accumulated_transcript[-500:] if accumulated_transcript else "",
+                                            structure=structure,
+                                            voice=selected_voice,
+                                            tts_model=selected_tts_model,
+                                            websocket=websocket
+                                        )
+                                    )
 
                     elif msg_type == "go_to_section":
                         # Go to specific section (Q hotkey - go back)
@@ -771,10 +972,12 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
 
                             # === Spawn Brain processing as background task ===
                             # Audio capture continues in main loop while Brain runs
-                            async def process_brain_background():
-                                nonlocal brain_processing, is_speaking, pending_response, last_prompt, last_remind_time, all_sections_covered
+                            # Set flag BEFORE launching task to prevent double-trigger
+                            brain_processing = True
 
-                                brain_processing = True
+                            async def process_brain_background():
+                                nonlocal brain_processing, is_speaking, pending_response, last_prompt, last_remind_time, all_sections_covered, accumulated_transcript
+
                                 brain_start = time.time()
 
                                 try:

@@ -111,7 +111,7 @@ async def health():
 @app.get("/api/session/{session_id}/outline")
 async def get_session_outline(session_id: str):
     """Get session outline (structure + progress) from Redis."""
-    from core.redis_client import get_script_structure, get_session_state
+    from core.redis_client import get_script_structure, get_session_state, get_prediction_status
 
     structure = await get_script_structure(session_id)
     state = await get_session_state(session_id)
@@ -123,12 +123,57 @@ async def get_session_outline(session_id: str):
     sections_covered = state.get("all_sections_covered", []) if state else []
     keyword_progress = state.get("keyword_progress", {}) if state else {}
 
+    # Get prediction cache status (if enabled)
+    prediction_status = await get_prediction_status(session_id)
+    predictions = prediction_status.get("predictions_by_section", {}) if prediction_status else {}
+
     return {
         "found": True,
         "structure": structure,
         "sections_covered": sections_covered,
-        "keyword_progress": keyword_progress
+        "keyword_progress": keyword_progress,
+        "predictions": predictions
     }
+
+
+@app.get("/api/session/{session_id}/cache-stats")
+async def get_cache_stats(session_id: str):
+    """Get prediction cache statistics for a session."""
+    from core.redis_client import get_prediction_status, get_voice_cache_keywords
+
+    prediction_status = await get_prediction_status(session_id)
+    cached_keywords = await get_voice_cache_keywords(session_id)
+
+    if not prediction_status:
+        return {"enabled": False}
+
+    return {
+        "enabled": True,
+        "status": prediction_status.get("status", "unknown"),
+        "generated": prediction_status.get("generated", 0),
+        "keywords": prediction_status.get("keywords", []),
+        "cached_by_section": cached_keywords
+    }
+
+
+@app.delete("/api/session/{session_id}/cache")
+async def clear_prediction_cache(session_id: str):
+    """Clear prediction cache for a session."""
+    from core.redis_client import get_redis
+
+    r = await get_redis()
+
+    # Clear voice cache entries
+    voice_keys = await r.keys(f"stream:{session_id}:voice_cache:*")
+    voice_count = len(voice_keys) if voice_keys else 0
+    if voice_keys:
+        await r.delete(*voice_keys)
+
+    # Clear prediction status
+    await r.delete(f"stream:{session_id}:prediction_status")
+
+    logger.info(f"Cleared prediction cache for session {session_id}: {voice_count} entries")
+    return {"cleared": voice_count}
 
 
 class PasswordRequest(BaseModel):

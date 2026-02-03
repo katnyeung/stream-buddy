@@ -819,21 +819,15 @@ class StreamBuddy {
 
             case 'response_pending':
                 // Manual mode: brain has response ready, processing TTS in background
+                // Don't show text yet - wait until audio is ready
                 console.log('[StreamBuddy] Response pending (processing TTS):', msg.text);
                 this.pendingResponseText = msg.text;
 
-                // Show processing indicator (audio not ready yet)
+                // Show processing indicator only (no text yet)
                 this.buddySection.classList.add('pending');
                 this.buddySection.classList.remove('active');
 
-                // Strip action tags for display
-                let pendingDisplayText = msg.text;
-                if (this.actionParser) {
-                    pendingDisplayText = this.actionParser.stripTags(msg.text);
-                }
-
                 this.buddyText.innerHTML = `
-                    <span style="color: #aaaaaa;">${pendingDisplayText}</span>
                     <span class="pending-indicator">Processing...</span>
                     <span class="hotkey-hint">Preparing audio...</span>
                 `;

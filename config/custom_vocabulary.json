@@ -1,0 +1,37 @@
+{
+  "stt_corrections": {
+    "moltbook": "mold book",
+    "white coding": "vibe coding",
+    "eleven labs": "ElevenLabs",
+    "claude ai": "Claude AI",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "gpt4": "GPT-4",
+    "gpt-4": "GPT-4",
+    "chatgpt": "ChatGPT",
+    "v tuber": "VTuber",
+    "vtuber": "VTuber",
+    "obs": "OBS",
+    "api": "API",
+    "tts": "TTS",
+    "stt": "STT",
+    "llm": "LLM"
+  },
+  "whisper_context_boost": [
+    "Claude",
+    "Anthropic",
+    "ElevenLabs",
+    "VTuber",
+    "Stream Buddy",
+    "OBS",
+    "TTS",
+    "STT",
+    "OpenAI",
+    "GPT-4",
+    "ChatGPT",
+    "API",
+    "LLM",
+    "vibe coding",
+    "live stream"
+  ]
+}

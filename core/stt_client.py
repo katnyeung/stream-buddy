@@ -1,15 +1,18 @@
 """
 Speech-to-Text client using OpenAI Whisper.
 """
+import json
 import os
 import re
 import time
 import logging
+from pathlib import Path
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
 client: AsyncOpenAI | None = None
+_custom_vocabulary: dict | None = None
 
 
 def get_client() -> AsyncOpenAI:
@@ -80,6 +83,13 @@ def _remove_hallucinations(text: str) -> str:
         "Thanks for watching.",
         "Thank you for listening.",
         "Thanks for listening.",
+        "Thank you for joining us.",
+        "Thank you very much.",
+        "Thanks for joining us.",
+        "Please stay passive to us.",
+        "Please stay tuned.",
+        "Good night.",
+        "Good night,",
         "Subscribe to my channel.",
         "Please subscribe.",
         "Like and subscribe.",
@@ -280,3 +290,71 @@ async def transcribe_audio(filepath: str, context_prompt: str = "") -> str:
             os.unlink(filepath)
         except:
             pass
+
+
+def load_custom_vocabulary() -> dict:
+    """Load custom vocabulary corrections from config file."""
+    global _custom_vocabulary
+    if _custom_vocabulary is None:
+        config_path = Path(__file__).parent.parent / "config" / "custom_vocabulary.json"
+        try:
+            if config_path.exists():
+                with open(config_path, "r") as f:
+                    _custom_vocabulary = json.load(f)
+                logger.info(f"[STT] Loaded custom vocabulary: {len(_custom_vocabulary.get('stt_corrections', {}))} corrections")
+            else:
+                _custom_vocabulary = {"stt_corrections": {}, "whisper_context_boost": []}
+        except Exception as e:
+            logger.warning(f"[STT] Failed to load custom vocabulary: {e}")
+            _custom_vocabulary = {"stt_corrections": {}, "whisper_context_boost": []}
+    return _custom_vocabulary
+
+
+def apply_stt_corrections(transcript: str, corrections: dict | None = None) -> str:
+    """
+    Apply custom vocabulary corrections to STT output.
+
+    Args:
+        transcript: Raw STT transcript
+        corrections: Dict of {wrong: correct} mappings. If None, loads from config.
+
+    Returns:
+        Corrected transcript
+    """
+    if not transcript:
+        return transcript
+
+    if corrections is None:
+        vocab = load_custom_vocabulary()
+        corrections = vocab.get("stt_corrections", {})
+
+    if not corrections:
+        return transcript
+
+    result = transcript
+    for wrong, correct in corrections.items():
+        # Case-insensitive replacement
+        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        result = pattern.sub(correct, result)
+
+    if result != transcript:
+        logger.debug(f"[STT] Applied corrections: '{transcript[:50]}' -> '{result[:50]}'")
+
+    return result
+
+
+def get_whisper_context_boost() -> str:
+    """
+    Get whisper context prompt with boosted terms.
+
+    Returns:
+        Context prompt string for Whisper API
+    """
+    vocab = load_custom_vocabulary()
+    boost_terms = vocab.get("whisper_context_boost", [])
+
+    if not boost_terms:
+        return ""
+
+    # Create a context prompt that helps Whisper recognize these terms
+    return ", ".join(boost_terms)

@@ -147,6 +147,7 @@ class OBSPanel {
         this.voiceSelect = document.getElementById('voice-select');
         this.styleSelect = document.getElementById('style-select');
         this.proactiveToggle = document.getElementById('proactive-toggle');
+        this.predictionCacheToggle = document.getElementById('prediction-cache-toggle');
         this.personalitySelect = document.getElementById('personality-select');
         this.ttsModelSelect = document.getElementById('tts-model-select');
         this.startBtn = document.getElementById('start-btn');
@@ -167,7 +168,7 @@ class OBSPanel {
         this.timerBtn = document.getElementById('timer-btn');
         this.stopBtn = document.getElementById('stop-btn');
         this.resetBtn = document.getElementById('reset-btn');
-        this.overlayUrl = document.getElementById('overlay-url');
+        // overlay-url removed - using session-id-copy instead
 
         // Position controls
         this.posUpBtn = document.getElementById('pos-up');
@@ -182,6 +183,13 @@ class OBSPanel {
         // Pending response display
         this.pendingResponseEl = document.getElementById('pending-response');
         this.pendingTextEl = document.getElementById('pending-text');
+
+        // Prediction cache panel
+        this.predictionCachePanel = document.getElementById('prediction-cache-panel');
+        this.cacheStatusEl = document.getElementById('cache-status');
+        this.cachedKeywordsList = document.getElementById('cached-keywords-list');
+        this.cachedKeywords = [];  // Store keywords with section info
+        this.keywordByHotkey = {};  // {1: {keyword, section_id}, 2: {...}, ...} for keyboard trigger
 
         this.loadSettings();
 
@@ -258,7 +266,7 @@ class OBSPanel {
         document.addEventListener('keydown', (e) => this.handleHotkey(e));
 
         console.log('[OBSPanel] Initialized');
-        console.log('[OBSPanel] Hotkeys: Space=speak, E=complete section, Q=prev section, W=recap, P=stop');
+        console.log('[OBSPanel] Hotkeys: 1-9=cached responses, T=speak, E=complete section, Q=prev, W=recap, P=stop');
     }
 
     handleHotkey(e) {
@@ -272,8 +280,18 @@ class OBSPanel {
             return;
         }
 
-        // Space - Trigger pending response (TTS)
-        if (e.code === 'Space' && this.pendingResponseText && !this.autoResponseEnabled) {
+        // Keys 1-9 - Trigger cached keyword response
+        if (e.code.startsWith('Digit') && e.code !== 'Digit0') {
+            const keyNum = parseInt(e.code.replace('Digit', ''));
+            if (keyNum >= 1 && keyNum <= 9 && this.keywordByHotkey[keyNum]) {
+                e.preventDefault();
+                this.triggerCachedKeyword(keyNum);
+                return;
+            }
+        }
+
+        // T - Trigger pending response (TTS)
+        if (e.code === 'KeyT' && this.pendingResponseText && !this.autoResponseEnabled) {
             e.preventDefault();
             this.triggerPendingResponse();
             return;
@@ -468,6 +486,31 @@ class OBSPanel {
         }
     }
 
+    triggerCachedKeyword(keyNum) {
+        const mapping = this.keywordByHotkey[keyNum];
+        if (!mapping || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        console.log('[OBSPanel] Triggering cached keyword:', keyNum, mapping.keyword);
+        this.ws.send(JSON.stringify({
+            type: 'trigger_cached_keyword',
+            keyword: mapping.keyword
+        }));
+
+        // Visual feedback - highlight the triggered row
+        this.setStatus('speaking', `Playing: ${mapping.keyword}`);
+        this.highlightTriggeredKeyword(keyNum);
+    }
+
+    highlightTriggeredKeyword(keyNum) {
+        // Remove previous highlights
+        this.cachedKeywordsList?.querySelectorAll('.cached-keyword-row').forEach(el => {
+            el.classList.remove('triggered');
+        });
+        // Add highlight to triggered row
+        const row = this.cachedKeywordsList?.querySelector(`[data-key="${keyNum}"]`);
+        if (row) row.classList.add('triggered');
+    }
+
     generateSessionId() {
         // Use existing stored ID or create new one (persistent across reloads)
         let storedId = localStorage.getItem('streambuddy_session_id');
@@ -495,21 +538,8 @@ class OBSPanel {
     }
 
     updateOverlayUrl() {
-        let url = `${window.location.protocol}//${window.location.host}/obs/overlay`;
-        if (this.sessionId) {
-            url += `?session=${this.sessionId}`;
-        }
-        this.overlayUrl.textContent = url;
-        // Make it clickable/copyable
-        this.overlayUrl.style.cursor = 'pointer';
-        this.overlayUrl.title = 'Click to copy';
-        this.overlayUrl.onclick = () => {
-            navigator.clipboard.writeText(url).then(() => {
-                const original = this.overlayUrl.textContent;
-                this.overlayUrl.textContent = 'Copied!';
-                setTimeout(() => { this.overlayUrl.textContent = original; }, 1000);
-            });
-        };
+        // Now handled by updateSessionIdCopy() - single URL display
+        this.updateSessionIdCopy();
     }
 
     updateSessionIdCopy() {
@@ -575,6 +605,7 @@ class OBSPanel {
         }
         this.selectedStyle = this.styleSelect.value;
         this.proactiveEnabled = this.proactiveToggle?.checked || false;
+        this.predictionCacheEnabled = this.predictionCacheToggle?.checked || false;
         this.selectedPersonality = this.personalitySelect.value;
         this.selectedTtsModel = this.ttsModelSelect.value;
         this.pauseDuration = parseInt(this.pauseDurationSelect?.value) || DEFAULT_PAUSE_DURATION;
@@ -616,6 +647,7 @@ class OBSPanel {
         this.stopLipSync();
         this.audioQueue.clear();
         this.pauseTimer();
+        this.hidePredictionCachePanel();
 
         this.setupPanel.classList.remove('hidden');
         this.sessionPanel.classList.remove('active');
@@ -638,6 +670,17 @@ class OBSPanel {
         this.completedSections = new Set();
         this.renderSections();
         this.resetTimer();
+
+        // Reset prediction cache panel
+        this.hidePredictionCachePanel();
+    }
+
+    hidePredictionCachePanel() {
+        if (this.predictionCachePanel) {
+            this.predictionCachePanel.style.display = 'none';
+        }
+        this.cachedKeywords = [];
+        this.keywordByHotkey = {};
     }
 
     connectWebSocket(script) {
@@ -696,7 +739,8 @@ class OBSPanel {
                     style: this.selectedStyle,
                     proactive: this.proactiveEnabled,
                     personality: this.selectedPersonality,
-                    tts_model: this.selectedTtsModel
+                    tts_model: this.selectedTtsModel,
+                    use_prediction_cache: this.predictionCacheEnabled
                 }));
                 break;
 
@@ -705,8 +749,8 @@ class OBSPanel {
                 this.currentSection = 0;
                 this.completedSections = new Set();
                 this.renderSections();
-                this.setStatus('listening', this.autoResponseEnabled ? 'Listening...' : 'Listening (Space to speak)...');
-                this.startRecording();
+                // Don't start recording yet - wait for user to click "Start"
+                this.setStatus('connected', 'Ready - click Start to begin');
 
                 this.ws.send(JSON.stringify({ type: 'set_auto_response', enabled: this.autoResponseEnabled }));
                 this.ws.send(JSON.stringify({ type: 'set_periodic_interval', seconds: this.periodicInterval }));
@@ -714,17 +758,18 @@ class OBSPanel {
 
             case 'response_pending':
                 // Manual mode - processing TTS in background
+                // Don't show text yet - wait until audio is ready
                 console.log('[OBSPanel] Response pending (processing TTS):', msg.text?.substring(0, 50));
                 this.pendingResponseText = msg.text;
                 this.setStatus('pending', 'Processing TTS...');
-                this.showPendingResponse(msg.text, false);  // Don't play ding yet
+                // Don't call showPendingResponse here - text will show when audio_ready is received
                 break;
 
             case 'audio_ready':
-                // Manual mode - audio is ready, can press Space now
-                console.log('[OBSPanel] Audio ready (press Space):', msg.text?.substring(0, 50));
+                // Manual mode - audio is ready, can press T now
+                console.log('[OBSPanel] Audio ready (press T):', msg.text?.substring(0, 50));
                 this.pendingResponseText = msg.text;
-                this.setStatus('pending', 'Audio ready (Space to speak)');
+                this.setStatus('pending', 'Audio ready (T to speak)');
                 this.showPendingResponse(msg.text, true);  // Play ding now
                 break;
 
@@ -795,7 +840,83 @@ class OBSPanel {
             case 'stop_speaking_ack':
                 console.log('[OBSPanel] Stop speaking acknowledged');
                 break;
+
+            case 'prediction_status':
+                // Prediction cache generation status
+                console.log('[OBSPanel] Prediction cache:', msg.status, msg.cached_count || '');
+                this.showPredictionCachePanel(msg);
+                break;
+
+            case 'prediction_hit':
+                // Cache hit - instant response was sent
+                console.log('[OBSPanel] Prediction hit:', msg.keyword);
+                this.highlightCacheHit(msg.keyword);
+                this.addConversationItem('system', `⚡ Cache hit: "${msg.keyword}"`);
+                break;
+
+            case 'cache_slot_loading':
+                // Dynamic prediction being generated
+                console.log('[OBSPanel] Cache slot loading:', msg.key);
+                this.addLoadingSlot(msg.key);
+                break;
+
+            case 'cache_slot_ready':
+                // Dynamic prediction ready
+                console.log('[OBSPanel] Cache slot ready:', msg.key, msg.keyword);
+                this.updateSlotReady(msg.key, msg.keyword, msg.section_id);
+                break;
         }
+    }
+
+    addLoadingSlot(keyNum) {
+        if (!this.cachedKeywordsList) return;
+
+        // Check if slot already exists
+        let row = this.cachedKeywordsList.querySelector(`[data-key="${keyNum}"]`);
+        if (row) {
+            // Update existing slot to loading
+            row.classList.remove('ready', 'triggered');
+            row.classList.add('loading');
+            row.querySelector('.keyword-text').textContent = '(generating...)';
+            row.querySelector('.status-icon').textContent = '⟳';
+        } else {
+            // Add new loading slot
+            const html = `<div class="cached-keyword-row loading" data-key="${keyNum}" data-keyword="">
+                <span class="hotkey-badge">${keyNum}</span>
+                <span class="keyword-text">(generating...)</span>
+                <span class="status-icon">⟳</span>
+            </div>`;
+            this.cachedKeywordsList.insertAdjacentHTML('beforeend', html);
+        }
+    }
+
+    updateSlotReady(keyNum, keyword, sectionId) {
+        if (!this.cachedKeywordsList) return;
+
+        let row = this.cachedKeywordsList.querySelector(`[data-key="${keyNum}"]`);
+        if (row) {
+            // Update existing slot
+            row.classList.remove('loading', 'triggered');
+            row.classList.add('ready');
+            row.dataset.keyword = keyword.toLowerCase();
+            row.querySelector('.keyword-text').textContent = keyword;
+            row.querySelector('.status-icon').textContent = '✓';
+        } else {
+            // Create new slot
+            const html = `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml(keyword.toLowerCase())}">
+                <span class="hotkey-badge">${keyNum}</span>
+                <span class="keyword-text">${this.escapeHtml(keyword)}</span>
+                <span class="status-icon">✓</span>
+            </div>`;
+            this.cachedKeywordsList.insertAdjacentHTML('beforeend', html);
+        }
+
+        // Update hotkey mapping
+        this.keywordByHotkey[keyNum] = {
+            keyword: keyword,
+            section_id: sectionId
+        };
+        console.log('[OBSPanel] Updated hotkey mapping:', keyNum, '->', keyword);
     }
 
     // Play audio and send lip sync to overlay
@@ -1145,6 +1266,120 @@ class OBSPanel {
         }
     }
 
+    // Prediction Cache UI
+    showPredictionCachePanel(msg) {
+        if (!this.predictionCachePanel) {
+            console.warn('[OBSPanel] Prediction cache panel not found');
+            return;
+        }
+
+        console.log('[OBSPanel] showPredictionCachePanel:', msg);
+
+        const loadingBar = document.getElementById('cache-loading-bar');
+        const loadingProgress = document.getElementById('cache-loading-progress');
+        const loadingText = document.getElementById('cache-loading-text');
+
+        if (msg.status === 'generating') {
+            this.predictionCachePanel.style.display = 'block';
+            this.cacheStatusEl.textContent = 'Generating...';
+            this.cacheStatusEl.className = 'cache-status generating';
+            this.cachedKeywordsList.innerHTML = '';
+
+            // Show loading bar with indeterminate animation
+            if (loadingBar) {
+                loadingBar.style.display = 'block';
+                loadingProgress.className = 'loading-progress indeterminate';
+                loadingText.textContent = msg.message || 'Preloading welcome speech & keywords...';
+            }
+        } else if (msg.status === 'ready') {
+            this.predictionCachePanel.style.display = 'block';
+            this.cacheStatusEl.textContent = `${msg.cached_count || 0} keywords ready`;
+            this.cacheStatusEl.className = 'cache-status ready';
+
+            // Hide loading bar
+            if (loadingBar) {
+                loadingProgress.className = 'loading-progress';
+                loadingProgress.style.width = '100%';
+                loadingText.textContent = 'Ready!';
+                setTimeout(() => {
+                    loadingBar.style.display = 'none';
+                }, 500);
+            }
+
+            // Store and render keywords
+            this.cachedKeywords = msg.keywords || [];
+            console.log('[OBSPanel] Cached keywords:', this.cachedKeywords);
+
+            if (this.cachedKeywords.length > 0) {
+                this.renderCachedKeywords();
+            } else {
+                this.cachedKeywordsList.innerHTML = '<span style="color: #888; font-size: 0.8rem;">No keywords generated</span>';
+            }
+        } else if (msg.status === 'error') {
+            this.predictionCachePanel.style.display = 'block';
+            this.cacheStatusEl.textContent = 'Error';
+            this.cacheStatusEl.className = 'cache-status';
+
+            // Hide loading bar on error
+            if (loadingBar) {
+                loadingBar.style.display = 'none';
+            }
+
+            this.cachedKeywordsList.innerHTML = `<span style="color: #ff6b6b; font-size: 0.8rem;">${msg.message || 'Unknown error'}</span>`;
+        }
+    }
+
+    renderCachedKeywords() {
+        if (!this.cachedKeywordsList || !this.cachedKeywords.length) return;
+
+        // Sort by section_id to get consistent key ordering
+        const sorted = [...this.cachedKeywords].sort((a, b) => {
+            const aSection = typeof a === 'object' ? (a.section_id || 0) : 0;
+            const bSection = typeof b === 'object' ? (b.section_id || 0) : 0;
+            return aSection - bSection;
+        });
+
+        // Clear and rebuild hotkey mapping
+        this.keywordByHotkey = {};
+
+        this.cachedKeywordsList.innerHTML = sorted.map((item, index) => {
+            const keyword = typeof item === 'string' ? item : item.keyword;
+            const response = typeof item === 'object' ? item.response : '';
+            const sectionId = typeof item === 'object' ? item.section_id : '';
+            const keyNum = index + 1;  // Keys 1-9
+
+            // Store mapping for hotkey lookup
+            if (keyNum <= 9) {
+                this.keywordByHotkey[keyNum] = {
+                    keyword: keyword,
+                    section_id: sectionId
+                };
+            }
+
+            const tooltipAttr = response ? `title="${this.escapeHtml(response)}"` : '';
+
+            return `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml(keyword.toLowerCase())}">
+                <span class="hotkey-badge">${keyNum <= 9 ? keyNum : '-'}</span>
+                <span class="keyword-text" ${tooltipAttr}>${this.escapeHtml(keyword)}</span>
+                <span class="status-icon">✓</span>
+            </div>`;
+        }).join('');
+
+        console.log('[OBSPanel] Hotkey mapping:', this.keywordByHotkey);
+    }
+
+    highlightCacheHit(keyword) {
+        if (!this.cachedKeywordsList) return;
+
+        const normalizedKeyword = keyword.toLowerCase();
+        const row = this.cachedKeywordsList.querySelector(`[data-keyword="${normalizedKeyword}"]`);
+        if (row) {
+            row.classList.add('triggered');
+            // Remove triggered class after animation
+            setTimeout(() => row.classList.remove('triggered'), 2000);
+        }
+    }
+
     // Timer
     formatTime(s) { return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`; }
     toggleTimer() { this.timerRunning ? this.pauseTimer() : this.startTimer(); }
@@ -1158,6 +1393,10 @@ class OBSPanel {
             this.timerSeconds++;
             this.timerDisplay.textContent = this.formatTime(this.timerSeconds);
         }, 1000);
+
+        // Start recording/STT now (not on script_loaded)
+        this.startRecording();
+        this.setStatus('listening', this.autoResponseEnabled ? 'Listening...' : 'Listening (T to speak)...');
 
         // Send start_presentation to server - triggers welcome message (especially for proactive mode)
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -1211,6 +1450,9 @@ class OBSPanel {
                 if (s.proactive !== undefined && this.proactiveToggle) {
                     this.proactiveToggle.checked = s.proactive;
                 }
+                if (s.predictionCache !== undefined && this.predictionCacheToggle) {
+                    this.predictionCacheToggle.checked = s.predictionCache;
+                }
             }
         } catch (e) {}
     }
@@ -1222,6 +1464,7 @@ class OBSPanel {
                 voice: this.voiceSelect.value,
                 style: this.styleSelect.value,
                 proactive: this.proactiveToggle?.checked || false,
+                predictionCache: this.predictionCacheToggle?.checked || false,
                 personality: this.personalitySelect.value,
                 ttsModel: this.ttsModelSelect.value,
                 periodicInterval: this.periodicIntervalSelect?.value || '5',

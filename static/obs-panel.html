@@ -612,6 +612,283 @@
             display: none;
         }
 
+        /* Predicted keywords - distinct from section keywords */
+        .section-predictions {
+            margin-top: 8px;
+            padding-left: 34px;
+            padding: 6px 10px;
+            background: rgba(138, 43, 226, 0.1);
+            border-radius: 6px;
+            border-left: 2px solid #8b5cf6;
+            margin-left: 34px;
+        }
+
+        .predictions-label {
+            font-size: 0.7rem;
+            color: #8b5cf6;
+            text-transform: uppercase;
+            margin-right: 8px;
+        }
+
+        .prediction-keyword {
+            display: inline-block;
+            padding: 2px 8px;
+            margin: 2px 4px 2px 0;
+            background: rgba(139, 92, 246, 0.2);
+            border-radius: 12px;
+            font-size: 0.75rem;
+            color: #c4b5fd;
+        }
+
+        .prediction-keyword.cached {
+            background: rgba(139, 92, 246, 0.4);
+            color: #fff;
+        }
+
+        .prediction-keyword.hit {
+            background: #22c55e;
+            color: #fff;
+            animation: hitFlash 0.5s ease;
+        }
+
+        @keyframes hitFlash {
+            0% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+
+        /* Prediction Cache Panel */
+        .prediction-cache-panel {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(59, 130, 246, 0.1) 100%);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 15px;
+        }
+
+        .cache-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .cache-icon {
+            font-size: 1.2rem;
+        }
+
+        .cache-title {
+            font-weight: 600;
+            color: #a78bfa;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .cache-status {
+            font-size: 0.8rem;
+            color: #888;
+            margin-left: auto;
+        }
+
+        .cache-status.ready {
+            color: #22c55e;
+        }
+
+        .cache-status.generating {
+            color: #fbbf24;
+            animation: pulse 1s infinite;
+        }
+
+        .cache-loading-bar {
+            margin: 10px 0;
+        }
+
+        .loading-track {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .loading-progress {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #8b5cf6, #3b82f6);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .loading-progress.indeterminate {
+            width: 30%;
+            animation: indeterminate 1.5s ease-in-out infinite;
+        }
+
+        @keyframes indeterminate {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(400%); }
+        }
+
+        .loading-text {
+            display: block;
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        .cached-keywords-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        /* New row-based keyword display with hotkey badges */
+        .cached-keyword-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: rgba(139, 92, 246, 0.15);
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .cached-keyword-row:hover {
+            background: rgba(139, 92, 246, 0.25);
+        }
+
+        .hotkey-badge {
+            background: #ffa502;
+            color: #000;
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+
+        .cached-keyword-row.loading .hotkey-badge {
+            background: #666;
+            animation: pulse 1s infinite;
+        }
+
+        .cached-keyword-row.ready .hotkey-badge {
+            background: #ffa502;
+        }
+
+        .cached-keyword-row.triggered .hotkey-badge {
+            background: #51cf66;
+            animation: triggerFlash 0.5s ease;
+        }
+
+        @keyframes triggerFlash {
+            0% { transform: scale(1.3); box-shadow: 0 0 15px rgba(81, 207, 102, 0.8); }
+            100% { transform: scale(1); box-shadow: none; }
+        }
+
+        .keyword-text {
+            flex: 1;
+            color: #c4b5fd;
+            font-size: 0.9rem;
+        }
+
+        .status-icon {
+            font-size: 0.8rem;
+            color: #51cf66;
+        }
+
+        .cached-keyword-row.loading .status-icon {
+            color: #ffa502;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        /* Legacy chip style (can be removed if not used) */
+        .cached-keyword-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            background: rgba(139, 92, 246, 0.25);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: #c4b5fd;
+            transition: all 0.3s ease;
+        }
+
+        .cached-keyword-chip:hover {
+            background: rgba(139, 92, 246, 0.35);
+            border-color: #8b5cf6;
+        }
+
+        .cached-keyword-chip.hit {
+            background: rgba(34, 197, 94, 0.3);
+            border-color: #22c55e;
+            color: #86efac;
+            animation: chipHit 0.5s ease;
+        }
+
+        @keyframes chipHit {
+            0% { transform: scale(1.15); box-shadow: 0 0 20px rgba(34, 197, 94, 0.5); }
+            100% { transform: scale(1); box-shadow: none; }
+        }
+
+        .cached-keyword-chip .chip-section {
+            font-size: 0.65rem;
+            color: #8b5cf6;
+            margin-left: 6px;
+            padding: 2px 6px;
+            background: rgba(139, 92, 246, 0.3);
+            border-radius: 8px;
+        }
+
+        /* Tooltip for cached keyword response preview */
+        .cached-keyword-chip[title],
+        .keyword-text[title] {
+            position: relative;
+            cursor: help;
+        }
+
+        .cached-keyword-chip[title]:hover::after,
+        .keyword-text[title]:hover::after {
+            content: attr(title);
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1a1a2e;
+            border: 1px solid #8b5cf6;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .cached-keyword-chip[title]:hover::before,
+        .keyword-text[title]:hover::before {
+            content: '';
+            position: absolute;
+            bottom: calc(100% + 2px);
+            left: 50%;
+            transform: translateX(-50%);
+            border: 6px solid transparent;
+            border-top-color: #8b5cf6;
+            z-index: 100;
+        }
+
         /* Conversation panel */
         .conversation-panel {
             background: rgba(0, 0, 0, 0.5);
@@ -857,6 +1134,14 @@ Example:
                     </div>
 
                     <div class="setting-card">
+                        <label for="prediction-cache-toggle">Prediction Cache</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="prediction-cache-toggle">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="setting-card">
                         <label for="personality-select">Personality</label>
                         <select id="personality-select">
                             <option value="positive">Supportive</option>
@@ -893,7 +1178,7 @@ Example:
                 </div>
 
                 <div class="hotkey-hint" style="text-align: center; color: #888; font-size: 0.85rem; margin-bottom: 20px;">
-                    <strong>Hotkeys:</strong> Space=speak | E=complete section | Q=prev section | W=recap | P=stop
+                    <strong>Hotkeys:</strong> 1-9=cached responses | T=speak | E=complete section | Q=prev | W=recap | P=stop
                 </div>
 
                 <button id="start-btn" class="start-btn">Start Session</button>
@@ -950,14 +1235,33 @@ Example:
                 </div>
             </div>
 
+            <!-- Prediction Cache Status -->
+            <div id="prediction-cache-panel" class="prediction-cache-panel" style="display: none;">
+                <div class="cache-header">
+                    <span class="cache-icon">⚡</span>
+                    <span class="cache-title">Prediction Cache</span>
+                    <span id="cache-status" class="cache-status">Generating...</span>
+                </div>
+                <!-- Loading progress bar -->
+                <div id="cache-loading-bar" class="cache-loading-bar" style="display: none;">
+                    <div class="loading-track">
+                        <div id="cache-loading-progress" class="loading-progress"></div>
+                    </div>
+                    <span id="cache-loading-text" class="loading-text">Preparing welcome speech...</span>
+                </div>
+                <div id="cached-keywords-list" class="cached-keywords-list">
+                    <!-- Keywords will be populated here -->
+                </div>
+            </div>
+
             <!-- Pending Response Display -->
             <div id="pending-response" class="pending-response">
                 <div class="pending-header">
                     <span class="pending-label">Response Ready</span>
-                    <span class="pending-indicator">Press SPACE</span>
+                    <span class="pending-indicator">Press T</span>
                 </div>
                 <div id="pending-text" class="pending-text"></div>
-                <div class="pending-hint">Press Space to speak, or P to cancel</div>
+                <div class="pending-hint">Press T to speak, or P to cancel</div>
             </div>
 
             <!-- Progress bar -->
@@ -990,16 +1294,11 @@ Example:
                 </div>
             </div>
 
-            <!-- Overlay link -->
-            <div class="overlay-link">
-                <h4>OBS Browser Source URL (click to copy):</h4>
-                <code id="overlay-url" style="cursor: pointer; user-select: all;">http://localhost:8000/obs/overlay</code>
+            <!-- OBS URL with session -->
+            <div class="overlay-link" style="background: rgba(255, 165, 2, 0.1); border-color: #ffa502;">
+                <h4 style="color: #ffa502;">OBS Browser Source URL (click to copy):</h4>
+                <code id="session-id-copy" style="cursor: pointer; font-size: 0.95rem; color: #ffa502; word-break: break-all;">http://localhost:8000/obs/overlay</code>
                 <small>1920x1080, transparent background, 60fps</small>
-            </div>
-            <div class="overlay-link" style="margin-top: 10px; background: rgba(255, 165, 2, 0.1); border-color: #ffa502;">
-                <h4 style="color: #ffa502;">Session ID:</h4>
-                <code id="session-id-copy" style="cursor: pointer; font-size: 1.1rem; color: #ffa502;">--waiting--</code>
-                <small>Copy this URL into OBS Browser Source after session starts</small>
             </div>
         </div>
     </div>
