@@ -749,37 +749,44 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
 
                     elif msg_type == "trigger_cached_keyword":
                         # Keyboard hotkey triggered - play cached keyword response
-                        keyword = data.get("keyword")
-                        if keyword and prediction_cache:
-                            cached = await prediction_cache.get_by_keyword(keyword)
-                            if cached:
-                                logger.info(f"[{session_id}] Hotkey trigger: '{keyword}' -> instant play")
-                                is_speaking = True
-                                audio_buffer.clear_all()
+                        keyword = msg.get("keyword")  # Use msg (parsed JSON), not data (raw websocket event)
+                        logger.info(f"[{session_id}] Hotkey trigger: keyword='{keyword}', cache_exists={prediction_cache is not None}")
 
-                                await websocket.send_json({
-                                    "type": "cohost_speaking",
-                                    "text": cached["response_text"],
-                                    "reason": f"Hotkey: {keyword}",
-                                    "from_cache": True
-                                })
-                                await websocket.send_json({
-                                    "type": "cohost_audio_queued",
-                                    "text": cached["response_text"],
-                                    "audio_base64": cached["audio_base64"],
-                                    "from_cache": True
-                                })
-                                await websocket.send_json({
-                                    "type": "prediction_hit",
-                                    "keyword": cached["keyword"],
-                                    "section_id": cached.get("section_id", 0)
-                                })
-                                if avatar_redis:
-                                    await avatar_redis.set_state(AvatarState.SPEAKING)
-                            else:
-                                logger.warning(f"[{session_id}] No cache for keyword: {keyword}")
+                        if not keyword:
+                            logger.warning(f"[{session_id}] Hotkey trigger: no keyword provided")
+                            continue
+
+                        if not prediction_cache:
+                            logger.warning(f"[{session_id}] Hotkey trigger: prediction cache not enabled")
+                            continue
+
+                        cached = await prediction_cache.get_by_keyword(keyword)
+                        if cached:
+                            logger.info(f"[{session_id}] Hotkey trigger: '{keyword}' -> instant play")
+                            is_speaking = True
+                            audio_buffer.clear_all()
+
+                            await websocket.send_json({
+                                "type": "cohost_speaking",
+                                "text": cached["response_text"],
+                                "reason": f"Hotkey: {keyword}",
+                                "from_cache": True
+                            })
+                            await websocket.send_json({
+                                "type": "cohost_audio_queued",
+                                "text": cached["response_text"],
+                                "audio_base64": cached["audio_base64"],
+                                "from_cache": True
+                            })
+                            await websocket.send_json({
+                                "type": "prediction_hit",
+                                "keyword": cached["keyword"],
+                                "section_id": cached.get("section_id", 0)
+                            })
+                            if avatar_redis:
+                                await avatar_redis.set_state(AvatarState.SPEAKING)
                         else:
-                            logger.warning(f"[{session_id}] Hotkey trigger without keyword or cache")
+                            logger.warning(f"[{session_id}] No cached audio for keyword: '{keyword}' (available: {list(prediction_cache.keyword_map.keys())})")
 
                     elif msg_type == "stop_speaking":
                         # Stop speaking immediately (P hotkey)

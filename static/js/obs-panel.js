@@ -283,6 +283,7 @@ class OBSPanel {
         // Keys 1-9 - Trigger cached keyword response
         if (e.code.startsWith('Digit') && e.code !== 'Digit0') {
             const keyNum = parseInt(e.code.replace('Digit', ''));
+            console.log('[OBSPanel] Digit key pressed:', keyNum, 'has mapping:', !!this.keywordByHotkey[keyNum]);
             if (keyNum >= 1 && keyNum <= 9 && this.keywordByHotkey[keyNum]) {
                 e.preventDefault();
                 this.triggerCachedKeyword(keyNum);
@@ -488,9 +489,22 @@ class OBSPanel {
 
     triggerCachedKeyword(keyNum) {
         const mapping = this.keywordByHotkey[keyNum];
-        if (!mapping || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        console.log('[OBSPanel] triggerCachedKeyword called:', keyNum, 'mapping:', mapping, 'all mappings:', this.keywordByHotkey);
 
-        console.log('[OBSPanel] Triggering cached keyword:', keyNum, mapping.keyword);
+        if (!mapping) {
+            console.warn('[OBSPanel] No mapping for key', keyNum);
+            return;
+        }
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('[OBSPanel] WebSocket not connected');
+            return;
+        }
+        if (!mapping.keyword) {
+            console.warn('[OBSPanel] Mapping exists but keyword is empty:', mapping);
+            return;
+        }
+
+        console.log('[OBSPanel] Sending trigger_cached_keyword:', keyNum, '->', mapping.keyword);
         this.ws.send(JSON.stringify({
             type: 'trigger_cached_keyword',
             keyword: mapping.keyword
@@ -1308,10 +1322,11 @@ class OBSPanel {
 
             // Store and render keywords
             this.cachedKeywords = msg.keywords || [];
-            console.log('[OBSPanel] Cached keywords:', this.cachedKeywords);
+            console.log('[OBSPanel] Cached keywords received:', JSON.stringify(this.cachedKeywords));
 
             if (this.cachedKeywords.length > 0) {
                 this.renderCachedKeywords();
+                console.log('[OBSPanel] After renderCachedKeywords, keywordByHotkey:', JSON.stringify(this.keywordByHotkey));
             } else {
                 this.cachedKeywordsList.innerHTML = '<span style="color: #888; font-size: 0.8rem;">No keywords generated</span>';
             }
@@ -1343,13 +1358,15 @@ class OBSPanel {
         this.keywordByHotkey = {};
 
         this.cachedKeywordsList.innerHTML = sorted.map((item, index) => {
-            const keyword = typeof item === 'string' ? item : item.keyword;
-            const response = typeof item === 'object' ? item.response : '';
-            const sectionId = typeof item === 'object' ? item.section_id : '';
+            const keyword = typeof item === 'string' ? item : (item.keyword || '');
+            const response = typeof item === 'object' ? (item.response || '') : '';
+            const sectionId = typeof item === 'object' ? (item.section_id || 0) : 0;
             const keyNum = index + 1;  // Keys 1-9
 
-            // Store mapping for hotkey lookup
-            if (keyNum <= 9) {
+            console.log(`[OBSPanel] Processing keyword ${keyNum}:`, keyword, 'from item:', item);
+
+            // Store mapping for hotkey lookup (only if keyword is valid)
+            if (keyNum <= 9 && keyword) {
                 this.keywordByHotkey[keyNum] = {
                     keyword: keyword,
                     section_id: sectionId
@@ -1358,9 +1375,9 @@ class OBSPanel {
 
             const tooltipAttr = response ? `title="${this.escapeHtml(response)}"` : '';
 
-            return `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml(keyword.toLowerCase())}">
+            return `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml((keyword || '').toLowerCase())}">
                 <span class="hotkey-badge">${keyNum <= 9 ? keyNum : '-'}</span>
-                <span class="keyword-text" ${tooltipAttr}>${this.escapeHtml(keyword)}</span>
+                <span class="keyword-text" ${tooltipAttr}>${this.escapeHtml(keyword || '(empty)')}</span>
                 <span class="status-icon">✓</span>
             </div>`;
         }).join('');
