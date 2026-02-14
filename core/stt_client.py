@@ -1,15 +1,18 @@
 """
 Speech-to-Text client using OpenAI Whisper.
 """
+import json
 import os
 import re
 import time
 import logging
+from pathlib import Path
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
 client: AsyncOpenAI | None = None
+_custom_vocabulary: dict | None = None
 
 
 def get_client() -> AsyncOpenAI:
@@ -71,16 +74,54 @@ def _remove_hallucinations(text: str) -> str:
     # Clean up extra whitespace
     result = re.sub(r'\s+', ' ', result).strip()
 
-    # Common hallucination phrases (from YouTube/training data)
-    hallucination_endings = [
+    # Whisper hallucination phrases (from YouTube training data)
+    # These appear when audio has silence - NOT legitimate presenter phrases
+    # Source: https://community.openai.com/t/whisper-hallucination-how-to-recognize-and-solve/218307
+    hallucination_phrases_anywhere = [
+        # YouTube ending phrases (very common hallucination)
         "Thank you for watching.",
         "Thanks for watching.",
-        "Thank you.",
-        "Thanks.",
+        "Thank you for listening.",
+        "Thanks for listening.",
+        "Thank you for joining us.",
+        "Thank you very much.",
+        "Thanks for joining us.",
+        "Please stay passive to us.",
+        "Please stay tuned.",
+        "Good night.",
+        "Good night,",
         "Subscribe to my channel.",
         "Please subscribe.",
         "Like and subscribe.",
+        "Don't forget to subscribe.",
+        "Hit the like button.",
+        "Ring the bell.",
+        "See you in the next video.",
         "See you next time.",
+        # Subtitle/caption artifacts
+        "Subtitles by",
+        "Sub by",
+        "Translated by",
+        "Transcribed by",
+        # Music/sound placeholders
+        "[Music]",
+        "[Applause]",
+        "[Laughter]",
+        "(Music)",
+        "(Applause)",
+    ]
+
+    # Remove hallucination phrases from anywhere in the text
+    for phrase in hallucination_phrases_anywhere:
+        result = re.sub(re.escape(phrase), "", result, flags=re.IGNORECASE)
+
+    # Clean up extra whitespace after removals
+    result = re.sub(r'\s+', ' ', result).strip()
+
+    # Phrases that are hallucinations ONLY at the END (not if said mid-sentence)
+    hallucination_endings = [
+        "Thank you.",
+        "Thanks.",
         "Bye bye.",
         "Bye.",
         "Goodbye.",
@@ -115,16 +156,35 @@ def _remove_repetitions(text: str) -> str:
 
     result = text
 
-    # Catch longer repeated phrases (10-60 chars) repeated 2+ times
-    # e.g., "I'm talking about the downside, so when I say a I'm talking about..."
-    result = re.sub(r'(.{10,60}?)\s*\1(?:\s*\1)*', r'\1', result)
+    # === Sentence-level deduplication (most effective for Whisper hallucinations) ===
+    # Split into sentences and remove duplicates while preserving order
+    sentences = re.split(r'(?<=[.!?])\s+', result)
+    if len(sentences) > 2:
+        seen = set()
+        unique_sentences = []
+        for s in sentences:
+            s_clean = s.strip()
+            s_normalized = s_clean.lower()
+            if s_normalized and s_normalized not in seen:
+                seen.add(s_normalized)
+                unique_sentences.append(s_clean)
+
+        # If we removed more than half the sentences, it was likely repetitive hallucination
+        if len(unique_sentences) < len(sentences) * 0.6:
+            result = ' '.join(unique_sentences)
+            logger.info(f"[STT] Removed {len(sentences) - len(unique_sentences)} duplicate sentences")
+
+    # Catch longer repeated phrases (10-150 chars) repeated 2+ times
+    # e.g., "I'm Cassandra. I'm a software engineer. I'm Cassandra. I'm a software engineer."
+    result = re.sub(r'(.{10,150}?)\s*\1(?:\s*\1)*', r'\1', result)
+
+    # Catch sentence-level repetitions with "So, let's get started" patterns
+    result = re.sub(r'((?:So,?\s*)?let\'s get started\.?\s*)+', "Let's get started. ", result, flags=re.IGNORECASE)
 
     # Remove excessive word/phrase repetitions (any language)
-    # Pattern: same word/phrase repeated 3+ times
     result = re.sub(r'(\S+)(?:[,，、\s]+\1){2,}', r'\1', result)
 
     # Catch repeated characters/words without separators
-    # e.g., "教育教育教育教育" → "教育"
     result = re.sub(r'(.{1,6}?)\1{3,}', r'\1', result)
 
     # Catch "tech topics, tech topics, tech topics" pattern
@@ -133,6 +193,10 @@ def _remove_repetitions(text: str) -> str:
     # Catch any "X, X, X, X" pattern (same phrase repeated with comma)
     result = re.sub(r'([^,]{3,30}),(\s*\1,?){2,}', r'\1', result)
 
+    # Catch "I'm X. I'm a Y. And I'm here to..." repeated patterns
+    result = re.sub(r'(I\'m \w+\.\s*I\'m a \w+[^.]*\.\s*And I\'m here[^.]*\.?\s*)+', r'\1', result, flags=re.IGNORECASE)
+
+    # === Word-level deduplication at the end ===
     words = result.split()
     if len(words) < 6:
         return result
@@ -163,8 +227,8 @@ async def transcribe_audio(filepath: str, context_prompt: str = "") -> str:
         return ""
 
     file_size = os.path.getsize(filepath)
-    if file_size < 1024:  # Skip files less than 1KB
-        logger.warning(f"[STT] File too small: {file_size} bytes")
+    if file_size < 10000:  # Skip files less than 10KB (Whisper needs ~0.5s of audio minimum)
+        logger.debug(f"[STT] File too small: {file_size} bytes, skipping")
         return ""
 
     logger.info(f"[STT] Transcribing {file_size} bytes...")
@@ -193,6 +257,18 @@ async def transcribe_audio(filepath: str, context_prompt: str = "") -> str:
 
         text = response.text if hasattr(response, 'text') else ""
 
+        # Check for abnormally long transcript (hallucination indicator)
+        # Normal speech is ~2-3 words/second, audio is ~10KB/second
+        # If we get 50+ words from <50KB audio, it's suspicious
+        word_count = len(text.split()) if text else 0
+        expected_max_words = max(20, file_size // 2000)  # ~2 words per 2KB
+        if word_count > expected_max_words * 2:
+            logger.warning(f"[STT] Suspicious transcript: {word_count} words from {file_size} bytes (expected max ~{expected_max_words})")
+            # Truncate to reasonable length
+            words = text.split()[:expected_max_words]
+            text = ' '.join(words)
+            logger.info(f"[STT] Truncated to {len(words)} words")
+
         # Post-process to remove hallucinations
         original_len = len(text)
         text = _remove_hallucinations(text)
@@ -214,3 +290,71 @@ async def transcribe_audio(filepath: str, context_prompt: str = "") -> str:
             os.unlink(filepath)
         except:
             pass
+
+
+def load_custom_vocabulary() -> dict:
+    """Load custom vocabulary corrections from config file."""
+    global _custom_vocabulary
+    if _custom_vocabulary is None:
+        config_path = Path(__file__).parent.parent / "config" / "custom_vocabulary.json"
+        try:
+            if config_path.exists():
+                with open(config_path, "r") as f:
+                    _custom_vocabulary = json.load(f)
+                logger.info(f"[STT] Loaded custom vocabulary: {len(_custom_vocabulary.get('stt_corrections', {}))} corrections")
+            else:
+                _custom_vocabulary = {"stt_corrections": {}, "whisper_context_boost": []}
+        except Exception as e:
+            logger.warning(f"[STT] Failed to load custom vocabulary: {e}")
+            _custom_vocabulary = {"stt_corrections": {}, "whisper_context_boost": []}
+    return _custom_vocabulary
+
+
+def apply_stt_corrections(transcript: str, corrections: dict | None = None) -> str:
+    """
+    Apply custom vocabulary corrections to STT output.
+
+    Args:
+        transcript: Raw STT transcript
+        corrections: Dict of {wrong: correct} mappings. If None, loads from config.
+
+    Returns:
+        Corrected transcript
+    """
+    if not transcript:
+        return transcript
+
+    if corrections is None:
+        vocab = load_custom_vocabulary()
+        corrections = vocab.get("stt_corrections", {})
+
+    if not corrections:
+        return transcript
+
+    result = transcript
+    for wrong, correct in corrections.items():
+        # Case-insensitive replacement
+        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        result = pattern.sub(correct, result)
+
+    if result != transcript:
+        logger.debug(f"[STT] Applied corrections: '{transcript[:50]}' -> '{result[:50]}'")
+
+    return result
+
+
+def get_whisper_context_boost() -> str:
+    """
+    Get whisper context prompt with boosted terms.
+
+    Returns:
+        Context prompt string for Whisper API
+    """
+    vocab = load_custom_vocabulary()
+    boost_terms = vocab.get("whisper_context_boost", [])
+
+    if not boost_terms:
+        return ""
+
+    # Create a context prompt that helps Whisper recognize these terms
+    return ", ".join(boost_terms)

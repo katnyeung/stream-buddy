@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Buddy - Overlay</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            width: 1920px;
+            height: 1080px;
+            background: transparent;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        #obs-canvas {
+            width: 1920px;
+            height: 1080px;
+            display: block;
+            background: transparent;
+        }
+
+        /* Chat Bubble - Positioned relative to avatar */
+        .chat-bubble-container {
+            position: fixed;
+            pointer-events: none;
+            z-index: 100;
+            transition: all 0.3s ease;
+        }
+
+        .chat-bubble {
+            position: relative;
+            background: linear-gradient(135deg, #2d2d4a 0%, #1a1a2e 100%);
+            border: 2px solid #ffa502;
+            border-radius: 20px;
+            padding: 16px 20px;
+            max-width: 400px;
+            min-width: 200px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 30px rgba(255, 165, 2, 0.2);
+            opacity: 0;
+            transform: scale(0.9) translateY(10px);
+            transition: all 0.3s ease;
+        }
+
+        .chat-bubble.visible {
+            opacity: 1;
+            transform: scale(1) translateY(0);
+        }
+
+        .chat-bubble::before {
+            content: '';
+            position: absolute;
+            left: -12px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-width: 12px;
+            border-style: solid;
+            border-color: transparent #ffa502 transparent transparent;
+        }
+
+        .chat-bubble::after {
+            content: '';
+            position: absolute;
+            left: -8px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-width: 10px;
+            border-style: solid;
+            border-color: transparent #2d2d4a transparent transparent;
+        }
+
+        /* Bubble pointing right (when avatar is on right side) */
+        .chat-bubble.point-right::before {
+            left: auto;
+            right: -12px;
+            border-color: transparent transparent transparent #ffa502;
+        }
+
+        .chat-bubble.point-right::after {
+            left: auto;
+            right: -8px;
+            border-color: transparent transparent transparent #2d2d4a;
+        }
+
+        /* Bubble pointing down (alternative - closer to head) */
+        .chat-bubble.point-down::before {
+            left: 50%;
+            top: auto;
+            bottom: -12px;
+            transform: translateX(-50%);
+            border-color: #ffa502 transparent transparent transparent;
+        }
+
+        .chat-bubble.point-down::after {
+            left: 50%;
+            top: auto;
+            bottom: -8px;
+            transform: translateX(-50%);
+            border-color: #2d2d4a transparent transparent transparent;
+        }
+
+        .chat-bubble-text {
+            font-size: 1.4rem;
+            font-weight: 500;
+            color: #fff;
+            line-height: 1.5;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+        }
+
+        .chat-bubble-text.speaking {
+            animation: textPulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes textPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .chat-bubble-name {
+            font-size: 0.85rem;
+            color: #ffa502;
+            margin-bottom: 6px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Subtitle mode (legacy - hidden by default) */
+        .buddy-overlay {
+            position: fixed;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: 85%;
+            width: 85%;
+            text-align: center;
+            pointer-events: none;
+            z-index: 100;
+            display: none; /* Hidden by default - using chat bubble instead */
+        }
+
+        .buddy-overlay.subtitle-mode {
+            display: block;
+        }
+
+        .buddy-text {
+            font-size: 2rem;
+            font-weight: 500;
+            color: #ffa502;
+            text-shadow:
+                2px 2px 4px rgba(0, 0, 0, 0.9),
+                -1px -1px 2px rgba(0, 0, 0, 0.5),
+                0 0 20px rgba(0, 0, 0, 0.7);
+            line-height: 1.5;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 15px 30px;
+            border-radius: 12px;
+            display: inline-block;
+            max-width: 100%;
+        }
+
+        .buddy-text:empty { display: none; }
+
+        .buddy-text.speaking {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.85; }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="obs-canvas" width="1920" height="1080"></canvas>
+
+    <!-- Chat Bubble (next to avatar) -->
+    <div id="chat-bubble-container" class="chat-bubble-container">
+        <div id="chat-bubble" class="chat-bubble">
+            <div class="chat-bubble-name">Buddy</div>
+            <div id="chat-bubble-text" class="chat-bubble-text"></div>
+        </div>
+    </div>
+
+    <!-- Subtitle mode (legacy, hidden by default) -->
+    <div class="buddy-overlay">
+        <div id="buddy-text" class="buddy-text"></div>
+    </div>
+
+    <!-- Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <!-- Action System -->
+    <script src="/static/js/action-parser.js"></script>
+    <script src="/static/js/action-library.js"></script>
+    <script src="/static/js/action-executor.js"></script>
+
+    <!-- Overlay Manager -->
+    <script src="/vtuber/overlay-manager.js"></script>
+
+    <!-- OBS Avatar Controller -->
+    <script src="/static/js/obs-avatar.js"></script>
+
+    <script>
+        /**
+         * OBS Overlay - Receives lip sync + text from control panel
+         * Chat bubble positioned next to avatar
+         */
+
+        let buddyTextEl = null;
+        let chatBubbleContainer = null;
+        let chatBubble = null;
+        let chatBubbleText = null;
+        let actionParser = null;
+        let bubbleHideTimeout = null;
+        const BUBBLE_TTL_MS = 8000;  // Hide bubble after 8s of no new text
+
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('[OBS Overlay] Initializing...');
+
+            buddyTextEl = document.getElementById('buddy-text');
+            chatBubbleContainer = document.getElementById('chat-bubble-container');
+            chatBubble = document.getElementById('chat-bubble');
+            chatBubbleText = document.getElementById('chat-bubble-text');
+
+            if (typeof ActionParser !== 'undefined') {
+                actionParser = new ActionParser();
+            }
+
+            // Wait for avatar to initialize
+            const waitForAvatar = setInterval(() => {
+                if (window.obsAvatar && window.obsAvatar.model) {
+                    clearInterval(waitForAvatar);
+
+                    // Hide arm parts (wrist/lower arms) by default
+                    hideArmParts();
+
+                    // Start position update loop for chat bubble
+                    startBubblePositionUpdater();
+
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const sessionId = urlParams.get('session') ||
+                                     localStorage.getItem('streambuddy_session_id') ||
+                                     'buddy';
+
+                    console.log(`[OBS Overlay] Connecting to session: ${sessionId}`);
+                    window.obsAvatar.connectServer(sessionId);
+
+                    // Override handleServerCommand to intercept lip sync commands from control panel
+                    const originalHandleServerCommand = window.obsAvatar.handleServerCommand.bind(window.obsAvatar);
+                    window.obsAvatar.handleServerCommand = function(cmd) {
+                        switch (cmd.type) {
+                            case 'display_text':
+                                displayText(cmd.text);
+                                break;
+
+                            case 'lipsync':
+                                // Apply lip sync amplitude to avatar
+                                applyLipSync(cmd.amplitude);
+                                break;
+
+                            case 'lipsync_start':
+                                console.log('[OBS Overlay] Lip sync started');
+                                chatBubbleText.classList.add('speaking');
+                                break;
+
+                            case 'lipsync_end':
+                                console.log('[OBS Overlay] Lip sync ended');
+                                applyLipSync(0);
+                                chatBubbleText.classList.remove('speaking');
+                                break;
+
+                            case 'clear_text':
+                                hideBubble();
+                                break;
+
+                            default:
+                                // Pass other commands to original handler
+                                originalHandleServerCommand(cmd);
+                        }
+                    };
+                }
+            }, 100);
+
+            setTimeout(() => {
+                clearInterval(waitForAvatar);
+                if (!window.obsAvatar) {
+                    console.error('[OBS Overlay] Avatar failed to initialize');
+                }
+            }, 10000);
+        });
+
+        function startBubblePositionUpdater() {
+            // Update bubble position every frame to follow avatar
+            function updateBubblePosition() {
+                if (!window.obsAvatar || !chatBubbleContainer) {
+                    requestAnimationFrame(updateBubblePosition);
+                    return;
+                }
+
+                const pos = window.obsAvatar.getPosition();
+                const avatarX = pos.x;
+                const avatarY = pos.y;
+                const scale = pos.scale;
+
+                // Calculate bubble position relative to avatar
+                // Position at upper body/head level (avatarY is center, head is ~600*scale above)
+                const headY = avatarY - 550 * scale;
+
+                // Determine if avatar is on left or right side of screen
+                const isOnLeft = avatarX < 960;
+
+                let bubbleX, bubbleY;
+                if (isOnLeft) {
+                    // Bubble on right side of avatar (near head)
+                    bubbleX = avatarX + 250 * scale;
+                    chatBubble.classList.remove('point-right');
+                } else {
+                    // Bubble on left side of avatar (near head)
+                    bubbleX = avatarX - 250 * scale - 400; // 400 = bubble max width
+                    chatBubble.classList.add('point-right');
+                }
+                bubbleY = Math.max(50, headY);  // At head level, min 50px from top
+
+                // Clamp to screen bounds
+                bubbleX = Math.max(20, Math.min(1500, bubbleX));
+                bubbleY = Math.max(20, Math.min(700, bubbleY));
+
+                chatBubbleContainer.style.left = `${bubbleX}px`;
+                chatBubbleContainer.style.top = `${bubbleY}px`;
+
+                requestAnimationFrame(updateBubblePosition);
+            }
+
+            updateBubblePosition();
+        }
+
+        function displayText(text) {
+            if (!chatBubbleText || !text) return;
+
+            // Strip action tags
+            let cleanText = text;
+            if (actionParser) {
+                try {
+                    const parsed = actionParser.parseWithTiming(text, 60);
+                    cleanText = parsed.cleanText;
+                } catch (e) {}
+            }
+
+            chatBubbleText.textContent = cleanText;
+            chatBubble.classList.add('visible');
+            chatBubbleText.classList.add('speaking');
+
+            // Also update legacy subtitle (hidden by default)
+            if (buddyTextEl) {
+                buddyTextEl.textContent = cleanText;
+                buddyTextEl.classList.add('speaking');
+            }
+
+            console.log(`[OBS Overlay] Text: "${cleanText.substring(0, 50)}..."`);
+
+            // Auto-hide bubble after TTL
+            if (bubbleHideTimeout) clearTimeout(bubbleHideTimeout);
+            bubbleHideTimeout = setTimeout(() => {
+                hideBubble();
+            }, BUBBLE_TTL_MS);
+        }
+
+        function hideBubble() {
+            if (chatBubble) {
+                chatBubble.classList.remove('visible');
+                chatBubbleText.classList.remove('speaking');
+            }
+            if (buddyTextEl) {
+                buddyTextEl.innerHTML = '';
+                buddyTextEl.classList.remove('speaking');
+            }
+            if (bubbleHideTimeout) {
+                clearTimeout(bubbleHideTimeout);
+                bubbleHideTimeout = null;
+            }
+        }
+
+        function applyLipSync(amplitude) {
+            if (!window.obsAvatar) return;
+
+            // Map amplitude to mouth open parameter (0-1 range)
+            const mouthValue = Math.min(0.7, amplitude * 1.1);
+            window.obsAvatar.setParam('mouthOpen', mouthValue);
+        }
+
+        function hideArmParts() {
+            if (!window.obsAvatar || !window.obsAvatar.model) return;
+
+            const coreModel = window.obsAvatar.model.internalModel.coreModel;
+
+            if (coreModel._partIds) {
+                console.log('[OBS Overlay] Available parts:', coreModel._partIds);
+
+                const armPartPatterns = [
+                    'ArmLA', 'ArmRA',
+                    'PartArmLA', 'PartArmRA',
+                    'Arm_L_A', 'Arm_R_A',
+                    'armLA', 'armRA'
+                ];
+
+                coreModel._partIds.forEach((partId, index) => {
+                    const shouldHide = armPartPatterns.some(pattern =>
+                        partId.toLowerCase().includes(pattern.toLowerCase())
+                    );
+
+                    if (shouldHide) {
+                        console.log(`[OBS Overlay] Hiding part: ${partId} (index ${index})`);
+                        window.obsAvatar.setPartOpacity(index, 0);
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html>

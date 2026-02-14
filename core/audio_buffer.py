@@ -19,6 +19,8 @@ class AudioBuffer:
         self.stored_header: bytes | None = None
         self.accumulated_chunks: list[bytes] = []
         self.total_bytes = 0
+        # Track position for partial clears (preserve audio during long operations)
+        self._mark_position = 0
 
     def append(self, chunk: bytes) -> None:
         """Append audio chunk to buffer."""
@@ -31,6 +33,23 @@ class AudioBuffer:
             offset = find_cluster_offset(chunk)
             if offset > 0:
                 self.stored_header = chunk[:offset]
+
+    def mark_position(self) -> int:
+        """Mark current position in accumulated_chunks. Returns the position."""
+        self._mark_position = len(self.accumulated_chunks)
+        return self._mark_position
+
+    def clear_before_mark(self) -> None:
+        """Clear accumulated chunks before the marked position, keep chunks after.
+        This preserves audio captured during long operations like LLM processing."""
+        if self._mark_position > 0 and self._mark_position < len(self.accumulated_chunks):
+            # Keep only chunks after the mark
+            self.accumulated_chunks = self.accumulated_chunks[self._mark_position:]
+        elif self._mark_position >= len(self.accumulated_chunks):
+            # Mark is at or past end, clear all
+            self.accumulated_chunks = []
+        # Reset mark
+        self._mark_position = 0
 
     def get_accumulated_with_header(self) -> bytes:
         """Get all accumulated audio data with WebM header prepended."""

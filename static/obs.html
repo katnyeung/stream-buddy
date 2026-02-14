@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Buddy OBS - 1080p</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        /* Main layout - canvas on top, setup below */
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        /* Canvas container - always visible */
+        .canvas-section {
+            width: 100%;
+            background: #0a0a15;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 10px;
+            position: relative;
+        }
+
+        .canvas-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 1280px;
+            aspect-ratio: 16/9;
+            background: linear-gradient(135deg, #1a1a2e 0%, #0f0f1a 100%);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        }
+
+        #obs-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Setup panel - below canvas */
+        .setup-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background: #1a1a2e;
+            transition: all 0.3s ease;
+        }
+
+        .setup-panel.hidden {
+            display: none;
+        }
+
+        .setup-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .setup-header h1 {
+            color: #00d4ff;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .setup-header .subtitle {
+            color: #888;
+            font-size: 1.1rem;
+        }
+
+        .setup-header .obs-badge {
+            display: inline-block;
+            background: #ff6b6b;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .script-input-container {
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .script-input-container label {
+            display: block;
+            margin-bottom: 10px;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .script-textarea {
+            width: 100%;
+            height: 250px;
+            background: #16213e;
+            border: 2px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            color: #eee;
+            font-size: 1rem;
+            font-family: inherit;
+            resize: vertical;
+            margin-bottom: 20px;
+        }
+
+        .script-textarea:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .script-textarea::placeholder { color: #555; }
+
+        /* Settings Grid */
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .setting-card {
+            background: rgba(22, 33, 62, 0.8);
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 15px;
+            transition: border-color 0.2s;
+        }
+
+        .setting-card:hover { border-color: #00d4ff; }
+
+        .setting-card label {
+            display: block;
+            color: #00d4ff;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .setting-card select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .setting-card select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .setting-hint {
+            color: #666;
+            font-size: 0.75rem;
+            margin-top: 6px;
+        }
+
+        .start-btn {
+            padding: 15px 60px;
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.3rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .start-btn:hover {
+            background: #00b8e6;
+            transform: scale(1.02);
+        }
+
+        /* Session active - minimal UI */
+        .session-active .setup-panel {
+            display: none;
+        }
+
+        .session-active .canvas-section {
+            flex: 1;
+        }
+
+        .session-active .canvas-wrapper {
+            max-width: 100%;
+            max-height: calc(100vh - 20px);
+            border-radius: 0;
+        }
+
+        /* Buddy Text Overlay (bottom of canvas) */
+        .buddy-overlay {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: 90%;
+            width: 90%;
+            text-align: center;
+            pointer-events: none;
+        }
+
+        .buddy-text {
+            font-size: 1.4rem;
+            font-weight: 500;
+            color: #ffa502;
+            text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
+            line-height: 1.4;
+        }
+
+        @media (min-width: 1400px) {
+            .buddy-text {
+                font-size: 1.8rem;
+            }
+        }
+
+        .buddy-text.speaking {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .buddy-sentence {
+            display: block;
+            opacity: 0;
+            transform: translateY(10px);
+            animation: sentenceFadeIn 0.4s ease forwards;
+            margin-bottom: 8px;
+        }
+
+        .buddy-sentence.current { color: #ffcc00; }
+
+        @keyframes sentenceFadeIn {
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Status indicator (top-left of canvas) */
+        .status-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .session-active .status-overlay {
+            opacity: 1;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff6b6b;
+        }
+
+        .status-dot.connected { background: #51cf66; }
+        .status-dot.speaking { background: #00d4ff; animation: pulse 1s infinite; }
+
+        .status-text {
+            font-size: 0.9rem;
+            color: #ccc;
+        }
+
+        .session-id {
+            font-family: monospace;
+            color: #74c0fc;
+        }
+
+        /* Control buttons (top-right of canvas) */
+        .control-overlay {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            display: flex;
+            gap: 8px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .session-active .control-overlay {
+            opacity: 1;
+        }
+
+        .control-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-stop { background: #ff4757; color: white; }
+        .btn-reset { background: #333; color: #eee; }
+        .btn-stop:hover { background: #ff6b81; }
+        .btn-reset:hover { background: #444; }
+
+        /* Timer overlay (top-center of canvas) */
+        .timer-overlay {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 15px;
+            border-radius: 8px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .session-active .timer-overlay {
+            opacity: 1;
+        }
+
+        .timer-display {
+            font-size: 1.4rem;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+            color: #00d4ff;
+        }
+
+        .timer-display.running { color: #2ed573; }
+
+        .timer-btn {
+            padding: 6px 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .timer-btn.start { background: #2ed573; color: #1a1a2e; }
+        .timer-btn.pause { background: #ffa502; color: #1a1a2e; }
+
+        /* Progress bar (below timer) */
+        .progress-overlay {
+            position: absolute;
+            top: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50%;
+            max-width: 500px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 15px;
+            border-radius: 8px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .session-active .progress-overlay {
+            opacity: 1;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 0.8rem;
+            color: #888;
+        }
+
+        /* Sections panel (left side of canvas, scrollable) */
+        .sections-overlay {
+            position: absolute;
+            top: 100px;
+            left: 10px;
+            width: 280px;
+            max-height: 60%;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 10px;
+            padding: 12px;
+            overflow-y: auto;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 0.85rem;
+        }
+
+        .session-active .sections-overlay {
+            opacity: 1;
+        }
+
+        /* Drag hint - shown when not in session */
+        .drag-hint {
+            position: absolute;
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.6);
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: #888;
+            pointer-events: none;
+            transition: opacity 0.3s;
+        }
+
+        .session-active .drag-hint {
+            opacity: 0;
+        }
+
+        /* Overlay mode - just avatar, no UI (use ?overlay=true) */
+        body.overlay-mode {
+            background: transparent !important;
+        }
+
+        body.overlay-mode .setup-panel,
+        body.overlay-mode .status-overlay,
+        body.overlay-mode .timer-overlay,
+        body.overlay-mode .control-overlay,
+        body.overlay-mode .progress-overlay,
+        body.overlay-mode .sections-overlay,
+        body.overlay-mode .buddy-overlay,
+        body.overlay-mode .drag-hint {
+            display: none !important;
+        }
+
+        body.overlay-mode .canvas-section {
+            background: transparent;
+            padding: 0;
+        }
+
+        body.overlay-mode .canvas-wrapper {
+            background: transparent;
+            max-width: 100%;
+            width: 100%;
+            height: 100vh;
+            border-radius: 0;
+            box-shadow: none;
+        }
+
+        body.overlay-mode .main-container {
+            background: transparent;
+        }
+
+        .sections-list {
+            list-style: none;
+        }
+
+        .section-item {
+            padding: 8px 10px;
+            margin-bottom: 5px;
+            border-radius: 6px;
+            background: rgba(30, 40, 60, 0.6);
+            border-left: 3px solid #444;
+            font-size: 0.8rem;
+            color: #ccc;
+        }
+
+        .section-item.current {
+            background: rgba(255, 200, 50, 0.15);
+            border-left-color: #ffc832;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .section-item.completed {
+            background: rgba(0, 255, 136, 0.1);
+            border-left-color: #00ff88;
+            color: #aaa;
+        }
+
+        .section-number {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            line-height: 18px;
+            text-align: center;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.15);
+            margin-right: 6px;
+            font-size: 0.7rem;
+        }
+
+        .section-item.current .section-number {
+            background: #ffc832;
+            color: #1a1a2e;
+        }
+
+        .section-item.completed .section-number {
+            background: #00ff88;
+            color: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <div id="main-container" class="main-container">
+        <!-- Canvas Section - Always visible at top -->
+        <div class="canvas-section">
+            <div class="canvas-wrapper">
+                <canvas id="obs-canvas" width="1920" height="1080"></canvas>
+
+                <!-- Status overlay -->
+                <div class="status-overlay">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span class="status-text" id="status-text">Ready</span>
+                </div>
+
+                <!-- Timer overlay -->
+                <div class="timer-overlay">
+                    <div id="timer-display" class="timer-display">00:00</div>
+                    <button id="timer-btn" class="timer-btn start">Start</button>
+                </div>
+
+                <!-- Control buttons -->
+                <div class="control-overlay">
+                    <button id="stop-btn" class="control-btn btn-stop">Stop</button>
+                    <button id="reset-btn" class="control-btn btn-reset">Reset</button>
+                </div>
+
+                <!-- Progress overlay -->
+                <div class="progress-overlay">
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                    <div class="progress-info">
+                        <span id="section-info">Section 0</span>
+                        <span id="progress-percent">0%</span>
+                    </div>
+                </div>
+
+                <!-- Sections panel -->
+                <div class="sections-overlay">
+                    <ul id="sections-list" class="sections-list">
+                        <li class="section-item">No script loaded</li>
+                    </ul>
+                </div>
+
+                <!-- Buddy text overlay -->
+                <div class="buddy-overlay">
+                    <div id="buddy-text" class="buddy-text"></div>
+                </div>
+
+                <!-- Drag hint (shown before session starts) -->
+                <div class="drag-hint">Drag avatar to position • Scroll to zoom</div>
+            </div>
+        </div>
+
+        <!-- Setup Panel - Below canvas, hidden when session active -->
+        <div id="setup-panel" class="setup-panel">
+            <div class="setup-header">
+                <h1>Stream Buddy <span class="obs-badge">OBS 1080p</span></h1>
+                <p class="subtitle">Drag avatar to position, scroll to zoom</p>
+            </div>
+
+            <div class="script-input-container">
+                <label>Paste your script or talking points:</label>
+                <textarea
+                    id="script-input"
+                    class="script-textarea"
+                    placeholder="Enter your script here...
+
+Example:
+1. Introduction - Welcome viewers
+2. Main Topic - Explain concept
+3. Demo - Show how it works
+4. Q&A - Answer questions
+5. Outro - Thanks and call to action"
+                ></textarea>
+
+                <div class="settings-grid">
+                    <div class="setting-card">
+                        <label for="voice-select">Voice</label>
+                        <select id="voice-select">
+                            <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female)</option>
+                            <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female)</option>
+                            <option value="ErXwobaYiN019PkySvjV">Antoni (Male)</option>
+                            <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male)</option>
+                            <option value="flHkNRp1BlvT73UL6gyz">Aria (Female)</option>
+                            <option value="onwK4e9ZLuTAKqWW03F9">Daniel (Male)</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="tts-model-select">Quality</label>
+                        <select id="tts-model-select">
+                            <option value="eleven_flash_v2_5" selected>Flash - Fast</option>
+                            <option value="eleven_turbo_v2_5">Turbo - Balanced</option>
+                            <option value="eleven_multilingual_v2">Premium - Expressive</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="style-select">Engagement</label>
+                        <select id="style-select">
+                            <option value="aggressive">Aggressive</option>
+                            <option value="balanced" selected>Balanced</option>
+                            <option value="passive">Passive</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="personality-select">Personality</label>
+                        <select id="personality-select">
+                            <option value="positive">Supportive</option>
+                            <option value="neutral" selected>Neutral</option>
+                            <option value="critical">Skeptical</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="periodic-interval">Transcribe</label>
+                        <select id="periodic-interval">
+                            <option value="0">VAD Only</option>
+                            <option value="5" selected>5 seconds</option>
+                            <option value="10">10 seconds</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-card">
+                        <label for="pause-duration">Pause Detection</label>
+                        <select id="pause-duration">
+                            <option value="1500">1.5s (fast)</option>
+                            <option value="2000" selected>2s (default)</option>
+                            <option value="3000">3s (slow)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button id="start-btn" class="start-btn">Start OBS Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <!-- Action System -->
+    <script src="/static/js/action-parser.js"></script>
+    <script src="/static/js/action-library.js"></script>
+    <script src="/static/js/action-executor.js"></script>
+
+    <!-- Overlay Manager -->
+    <script src="/vtuber/overlay-manager.js"></script>
+
+    <!-- OBS Avatar Controller -->
+    <script src="/static/js/obs-avatar.js"></script>
+
+    <!-- OBS App Logic -->
+    <script src="/static/js/obs-app.js"></script>
+</body>
+</html>
