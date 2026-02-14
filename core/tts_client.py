@@ -1,6 +1,7 @@
 """
 Text-to-Speech client using ElevenLabs.
 """
+import asyncio
 import os
 import re
 import io
@@ -102,24 +103,21 @@ async def text_to_speech(text: str, voice: str = None, model: str = None) -> str
     if not clean_text:
         return ""
 
-    client = get_client()
+    tts_client = get_client()
 
-    try:
-        # ElevenLabs SDK v2.x: convert() returns an iterator (works for both streaming and non-streaming)
-        # The response is chunked, so it works with local wrappers that return StreamingResponse
-        audio_generator = client.text_to_speech.convert(
+    def _sync_tts():
+        """Run blocking ElevenLabs SDK call in a thread."""
+        audio_generator = tts_client.text_to_speech.convert(
             text=clean_text,
             voice_id=voice_id,
             model_id=model_id,
             output_format="mp3_44100_128"
         )
-
-        # Collect audio bytes from generator
         audio_bytes = b''.join(audio_generator)
+        return base64.b64encode(audio_bytes).decode('utf-8')
 
-        # Encode to base64
-        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-
+    try:
+        audio_base64 = await asyncio.to_thread(_sync_tts)
         return audio_base64
 
     except Exception as e:

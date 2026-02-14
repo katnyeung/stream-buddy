@@ -295,15 +295,33 @@ Only return valid JSON, no markdown."""
         return structure
 
 
-async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False, elapsed_mins: float = 0, target_mins: int = 10, sections_done: list = None, timeline: list = None, proactive: bool = False) -> dict:
-    """
-    Analyze current transcript and decide co-host action.
+async def _build_brain_context(
+    session_id: str,
+    transcript: str,
+    style: str = "balanced",
+    personality: str = "neutral",
+    supports_emotions: bool = False,
+    elapsed_mins: float = 0,
+    target_mins: int = 10,
+    sections_done: list = None,
+    timeline: list = None,
+    proactive: bool = False,
+    detail_level: str = "full",
+) -> dict | None:
+    """Build context for brain calls at different detail levels.
 
-    Actions:
-        - enrich: Add value to speaker's point (verbal)
-        - remind: Suggest next topic (visual only)
-        - respond: Answer direct question (verbal)
-        - wait: Stay quiet, let speaker flow
+    Args:
+        detail_level: "minimal" (Stage 1 quick decision), "full" (Stage 2 / legacy analyze_progress)
+
+    Returns dict with context pieces, or None if no structure/state loaded.
+    Keys:
+        structure, state, buddy_history, in_conversation, section_response_count,
+        sections_done_int, current_section_key, total_sections,
+        script_summary, section_titles, buddy_said, pacing_hint,
+        timing_context, next_section_title, next_section_num,
+        style_instructions, proactive_instructions, personality_instructions,
+        emotion_instructions, avatar_instructions, stt_guide, timeline_context,
+        conversation_context, transition_hint
     """
     if sections_done is None:
         sections_done = []
@@ -314,28 +332,20 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
     state = await get_session_state(session_id)
 
     if not structure or not state:
-        return {"action": "wait", "prompt_text": "", "speak_text": "", "reason": "no script loaded"}
+        return None
 
     # Add transcript to history
     state["transcript_history"].append(transcript)
     if len(state["transcript_history"]) > 20:
         state["transcript_history"] = state["transcript_history"][-20:]
 
-    # Track what Buddy has already said (don't repeat)
     buddy_history = state.get("buddy_history", [])
-
-    # Track if we're in a conversation (Buddy just spoke)
     in_conversation = state.get("in_conversation", False)
-
-    # Track responses per section for transition logic
     section_response_count = state.get("section_response_count", {})
-    # Ensure sections_done contains only integers for max() comparison
     sections_done_int = [int(s) for s in sections_done if str(s).isdigit()] if sections_done else []
     current_section_key = str(max(sections_done_int)) if sections_done_int else "0"
 
-    grok = get_grok_client()
-
-    # Build script summary with section IDs for tracking
+    # Build script summary
     section_titles = []
     script_summary = []
     total_sections = len(structure.get("sections", []))
@@ -344,17 +354,14 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
         section_titles.append(s['title'])
         covered_mark = "✓" if (i+1) in sections_done else "○"
 
-        # Use section_keywords (preferred) or fallback to key_points
         section_keywords = s.get("section_keywords", [])
         if section_keywords:
             keywords = ", ".join(section_keywords)
         else:
-            # Fallback: extract from speech-type key_points only (not action types)
             points = s.get("key_points", [])[:4]
             keywords_list = []
             for p in points:
                 if isinstance(p, dict):
-                    # Skip action-type points - they shouldn't trigger completion
                     if p.get("type") == "action":
                         continue
                     keywords_list.append(p.get("text", "")[:30])
@@ -363,10 +370,10 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
             keywords = ", ".join(keywords_list) if keywords_list else s['title']
 
         script_summary.append(f"[{i+1}] {covered_mark} {s['title']}\n    Keywords: {keywords}")
-        if i == 0:  # Log first section as sample
+        if i == 0:
             print(f"[Brain] First section: {s['title']}, keywords: {section_keywords[:3] if section_keywords else 'fallback'}")
 
-    # Build buddy history string - make it prominent
+    # Buddy history string
     buddy_said = ""
     if buddy_history:
         buddy_said = f"""
@@ -375,6 +382,71 @@ async def analyze_progress(session_id: str, transcript: str, style: str = "balan
 {chr(10).join(f'- "{h[:100]}..."' for h in buddy_history)}
 
 CRITICAL: Say something DIFFERENT each time. Don't repeat the same facts or phrases."""
+
+    # Timing/pacing context
+    coverage_pct = (len(sections_done_int) / total_sections * 100) if total_sections > 0 else 0
+    time_pct = (elapsed_mins / target_mins * 100) if target_mins > 0 else 0
+    expected_section = min(int((time_pct / 100) * total_sections) + 1, total_sections) if total_sections > 0 else 1
+    current_max_section = max(sections_done_int) if sections_done_int else 0
+
+    pacing_hint = ""
+    transition_urgency = ""
+    if elapsed_mins > 0 and total_sections > 0:
+        if current_max_section < expected_section:
+            pacing_hint = "BEHIND"
+            transition_urgency = f"⚠️ SHOULD BE ON SECTION {expected_section} BY NOW - Guide speaker to move forward!"
+        elif coverage_pct > time_pct + 20:
+            pacing_hint = "AHEAD"
+            transition_urgency = "Speaker has extra time, can elaborate more."
+        else:
+            pacing_hint = "ON TRACK"
+
+    next_section_title = ""
+    next_section_num = current_max_section + 1
+    if next_section_num <= total_sections:
+        next_section = structure.get("sections", [])[next_section_num - 1] if next_section_num <= len(structure.get("sections", [])) else None
+        if next_section:
+            next_section_title = next_section.get("title", "")
+
+    responses_on_section = section_response_count.get(current_section_key, 0)
+    transition_hint = ""
+    if responses_on_section >= 2:
+        transition_hint = f"🚨 YOU'VE RESPONDED {responses_on_section} TIMES ON SECTION {current_section_key} - TIME TO GUIDE TO NEXT SECTION!"
+
+    timing_context = f"""
+⏱️ TIME: {elapsed_mins:.1f} / {target_mins} min ({time_pct:.0f}% elapsed)
+📊 PROGRESS: {len(sections_done)} / {total_sections} sections covered
+📈 PACING: {pacing_hint}
+📋 NEXT SECTION (for reference): [{next_section_num}] "{next_section_title}"
+{transition_urgency}
+"""
+
+    # Minimal context stops here - used for Stage 1 quick decision
+    ctx = {
+        "structure": structure,
+        "state": state,
+        "buddy_history": buddy_history,
+        "in_conversation": in_conversation,
+        "section_response_count": section_response_count,
+        "sections_done_int": sections_done_int,
+        "current_section_key": current_section_key,
+        "total_sections": total_sections,
+        "script_summary": script_summary,
+        "section_titles": section_titles,
+        "buddy_said": buddy_said,
+        "pacing_hint": pacing_hint,
+        "timing_context": timing_context,
+        "next_section_title": next_section_title,
+        "next_section_num": next_section_num,
+        "transition_hint": transition_hint,
+        "style": style,
+        "proactive": proactive,
+    }
+
+    if detail_level == "minimal":
+        return ctx
+
+    # === Full detail: style, personality, emotion, avatar, STT, timeline ===
 
     # Conversation mode context
     conversation_context = ""
@@ -398,22 +470,23 @@ STYLE: AGGRESSIVE - Jump in often! React to names, companies, products, numbers.
 STYLE: PASSIVE - Only respond when asked directly."""
     else:  # balanced
         style_instructions = """
-STYLE: BALANCED - Engage consistently! Default is to RESPOND, not wait.
+STYLE: BALANCED - Be a co-host who actively guides the presentation forward.
 
-YOU SHOULD RESPOND (this is your default):
-- If transcript has 5+ words of real content → RESPOND
-- If speaker mentions any topic from the script → RESPOND
-- If speaker seems to be making a point → RESPOND
-- If it's been a while since you spoke → RESPOND
+RESPOND (~60% of the time) to:
+- Help the speaker transition to the next section when current one is wrapping up
+- React to key points with added value (a fact, insight, or encouraging comment)
+- Answer or acknowledge direct questions from the speaker
+- Add momentum when the speaker pauses or seems to be finishing a thought
+- Keep the presentation moving - you're a co-pilot, not just a listener
 
-ONLY WAIT if:
-- Transcript is CLEARLY just noise/errors (random words that make no sense)
-- Transcript is ONLY filler words ("um", "so", "okay", "uh")
-- Less than 4 words total
+WAIT (~40% of the time) when:
+- Speaker is clearly mid-sentence or just started a new thought
+- Transcript is noise/filler or less than 4 words
+- Speaker is in full flow and doesn't need help right now
 
-IMPORTANT: When in doubt, RESPOND with something supportive. It's better to engage than stay silent."""
+YOUR JOB: Keep the presentation engaging and on track. Guide forward, don't just react."""
 
-    # Proactive mode instructions (overlay on any style)
+    # Proactive mode instructions
     proactive_instructions = ""
     if proactive:
         proactive_instructions = """
@@ -564,7 +637,7 @@ NEVER SAY:
 - "That's interesting... So..."
 - Generic comparisons"""
 
-    # VTuber avatar action tags - ALWAYS include these
+    # VTuber avatar action tags
     avatar_instructions = """
 AVATAR ACTIONS: Embed action tags to control the VTuber avatar.
 Actions run in PARALLEL with speech - mood, gestures, and lip sync all happen together!
@@ -651,11 +724,10 @@ CRITICAL RULES:
 6. Use ARM gestures for greetings ([gesture:wave]), presenting ([gesture:present]), excitement ([gesture:thumbs_up])
 7. Use BODY gestures for emotion: [body:lean_in] when engaged, [body:bounce] when excited, [body:shrug] when unsure, [body:startle] when surprised"""
 
-    # Build conversation timeline with RELATIVE timestamps (NOW = 00:00, past = negative)
+    # Timeline context
     timeline_context = ""
     if timeline:
         def parse_timestamp(ts: str) -> int:
-            """Parse MM:SS to total seconds"""
             try:
                 parts = ts.split(":")
                 return int(parts[0]) * 60 + int(parts[1])
@@ -663,12 +735,10 @@ CRITICAL RULES:
                 return 0
 
         def format_relative_time(seconds_ago: int) -> str:
-            """Format as -MM:SS for past events"""
             mins = seconds_ago // 60
             secs = seconds_ago % 60
             return f"-{mins:02d}:{secs:02d}"
 
-        # Get current time from elapsed_mins
         now_seconds = int(elapsed_mins * 60)
 
         def clean_timeline_entry(entry):
@@ -676,15 +746,11 @@ CRITICAL RULES:
             if entry['speaker'].lower() == 'buddy':
                 text = strip_action_tags(text)
             speaker_icon = "🎤" if entry['speaker'].lower() == 'user' else "🤖"
-
-            # Calculate relative time (how long ago)
             entry_seconds = parse_timestamp(entry['time'])
             seconds_ago = now_seconds - entry_seconds
             rel_time = format_relative_time(seconds_ago) if seconds_ago > 0 else "00:00"
-
             return f"[{rel_time}] {speaker_icon} {entry['speaker']}: {text[:60]}..."
 
-        # Show last 3 entries (limited to prevent LLM confusion in later sections)
         recent_entries = timeline[-3:]
         timeline_lines = [clean_timeline_entry(entry) for entry in recent_entries]
 
@@ -693,59 +759,12 @@ CRITICAL RULES:
 {chr(10).join(timeline_lines)}
 """
 
-    # Build timing and coverage context
-    sections_remaining = [i+1 for i in range(total_sections) if (i+1) not in sections_done_int]
-    time_remaining = max(0, target_mins - elapsed_mins)
-    coverage_pct = (len(sections_done_int) / total_sections * 100) if total_sections > 0 else 0
-    time_pct = (elapsed_mins / target_mins * 100) if target_mins > 0 else 0
-
-    # Calculate expected section based on time
-    expected_section = min(int((time_pct / 100) * total_sections) + 1, total_sections) if total_sections > 0 else 1
-    current_max_section = max(sections_done_int) if sections_done_int else 0
-
-    # Determine pacing hint and transition need
-    pacing_hint = ""
-    transition_urgency = ""
-    if elapsed_mins > 0 and total_sections > 0:
-        if current_max_section < expected_section:
-            pacing_hint = "BEHIND"
-            transition_urgency = f"⚠️ SHOULD BE ON SECTION {expected_section} BY NOW - Guide speaker to move forward!"
-        elif coverage_pct > time_pct + 20:
-            pacing_hint = "AHEAD"
-            transition_urgency = "Speaker has extra time, can elaborate more."
-        else:
-            pacing_hint = "ON TRACK"
-
-    # Get next section title for transition
-    next_section_title = ""
-    next_section_num = current_max_section + 1
-    if next_section_num <= total_sections:
-        next_section = structure.get("sections", [])[next_section_num - 1] if next_section_num <= len(structure.get("sections", [])) else None
-        if next_section:
-            next_section_title = next_section.get("title", "")
-
-    # Get response count for current section
-    responses_on_section = section_response_count.get(current_section_key, 0)
-    transition_hint = ""
-    if responses_on_section >= 2:
-        transition_hint = f"🚨 YOU'VE RESPONDED {responses_on_section} TIMES ON SECTION {current_section_key} - TIME TO GUIDE TO NEXT SECTION!"
-
-    timing_context = f"""
-⏱️ TIME: {elapsed_mins:.1f} / {target_mins} min ({time_pct:.0f}% elapsed)
-📊 PROGRESS: {len(sections_done)} / {total_sections} sections covered
-📈 PACING: {pacing_hint}
-📋 NEXT SECTION (for reference): [{next_section_num}] "{next_section_title}"
-{transition_urgency}
-"""
-
-    # Extract key terms from script for STT correction guidance
+    # STT correction guide
     key_terms = set()
     for section in structure.get("sections", []):
-        # Add section title words
         for word in section.get("title", "").split():
             if len(word) > 3:
                 key_terms.add(word)
-        # Add key points words - handle both dict and string format
         for point in section.get("key_points", []):
             if isinstance(point, dict):
                 text = point.get("text", "")
@@ -758,7 +777,6 @@ CRITICAL RULES:
                     if len(word) > 4:
                         key_terms.add(word)
 
-    # Build STT correction guide with tolerance for non-native speakers
     stt_guide = f"""
 STT TOLERANCE (speaker may be non-native, STT makes mistakes):
 - ASSUME GOOD INTENT: If something sounds off, find the CLOSEST MEANING from context
@@ -769,6 +787,62 @@ STT TOLERANCE (speaker may be non-native, STT makes mistakes):
 - Context over literal: Use the script outline to interpret unclear speech
 - Example: If they say "the anti-gravity from Google" → probably means "Agentic AI" or a Google AI tool
 """
+
+    ctx.update({
+        "conversation_context": conversation_context,
+        "style_instructions": style_instructions,
+        "proactive_instructions": proactive_instructions,
+        "personality_instructions": personality_instructions,
+        "emotion_instructions": emotion_instructions,
+        "avatar_instructions": avatar_instructions,
+        "timeline_context": timeline_context,
+        "stt_guide": stt_guide,
+        "key_terms": key_terms,
+    })
+
+    return ctx
+
+
+async def analyze_progress(session_id: str, transcript: str, style: str = "balanced", personality: str = "neutral", supports_emotions: bool = False, elapsed_mins: float = 0, target_mins: int = 10, sections_done: list = None, timeline: list = None, proactive: bool = False) -> dict:
+    """
+    Analyze current transcript and decide co-host action.
+
+    Actions:
+        - enrich: Add value to speaker's point (verbal)
+        - remind: Suggest next topic (visual only)
+        - respond: Answer direct question (verbal)
+        - wait: Stay quiet, let speaker flow
+    """
+    ctx = await _build_brain_context(
+        session_id, transcript, style, personality, supports_emotions,
+        elapsed_mins, target_mins, sections_done, timeline, proactive,
+        detail_level="full"
+    )
+
+    if ctx is None:
+        return {"action": "wait", "prompt_text": "", "speak_text": "", "reason": "no script loaded"}
+
+    # Unpack context
+    structure = ctx["structure"]
+    state = ctx["state"]
+    buddy_history = ctx["buddy_history"]
+    sections_done_int = ctx["sections_done_int"]
+    current_section_key = ctx["current_section_key"]
+    total_sections = ctx["total_sections"]
+    script_summary = ctx["script_summary"]
+    section_titles = ctx["section_titles"]
+    buddy_said = ctx["buddy_said"]
+    pacing_hint = ctx["pacing_hint"]
+    timing_context = ctx["timing_context"]
+    timeline_context = ctx["timeline_context"]
+    style_instructions = ctx["style_instructions"]
+    proactive_instructions = ctx["proactive_instructions"]
+    personality_instructions = ctx["personality_instructions"]
+    emotion_instructions = ctx["emotion_instructions"]
+    avatar_instructions = ctx["avatar_instructions"]
+    stt_guide = ctx["stt_guide"]
+
+    grok = get_grok_client()
 
     prompt = f"""You are Buddy, co-host on a tech stream.
 {style_instructions}
@@ -947,6 +1021,324 @@ Example: "[mood:friendly] [head:nod] That's a great point - it really highlights
             "topics_covered": [],
             "reason": f"error: {e}"
         }
+
+
+def _get_two_stage_llm() -> str:
+    """Get the LLM provider for two-stage brain. 'gemini' or 'grok'."""
+    return os.getenv("TWO_STAGE_LLM", "gemini").lower()
+
+
+async def quick_decide_action(
+    session_id: str,
+    transcript: str,
+    style: str = "balanced",
+    personality: str = "neutral",
+    elapsed_mins: float = 0,
+    target_mins: int = 10,
+    sections_done: list = None,
+    timeline: list = None,
+    proactive: bool = False,
+) -> dict:
+    """Stage 1: Quick decision — respond or wait? (~200-400ms with Gemini)
+
+    Uses a minimal prompt with only what's needed to decide action + initial mood.
+    Returns: {"action": "respond|wait", "mood": "excited", "gesture": "nod", "reason": "brief"}
+    """
+    import time as _time
+    stage1_start = _time.time()
+
+    ctx = await _build_brain_context(
+        session_id, transcript, style, personality, False,
+        elapsed_mins, target_mins, sections_done, timeline, proactive,
+        detail_level="minimal"
+    )
+
+    if ctx is None:
+        return {"action": "wait", "mood": "neutral", "gesture": "none", "reason": "no script loaded"}
+
+    # Compact style hint
+    style_hint = {"aggressive": "Jump in often", "passive": "Only when asked", "balanced": "Guide the presentation forward"}
+    style_line = style_hint.get(style, style_hint["balanced"])
+
+    # Compact outline: just section titles with status (no keywords)
+    compact_outline = []
+    for i, title in enumerate(ctx["section_titles"]):
+        mark = "✓" if (i+1) in ctx["sections_done_int"] else "○"
+        compact_outline.append(f"{mark} {i+1}. {title}")
+
+    # Compact buddy history: just last 2-3 entries, very short
+    recent_buddy = ""
+    if ctx["buddy_history"]:
+        recent_buddy = "Recent: " + " | ".join(h[:40] for h in ctx["buddy_history"][-3:])
+
+    prompt = f""""{transcript}"
+
+Sections: {' / '.join(compact_outline)}
+Pacing: {ctx['pacing_hint'] or 'N/A'} ({elapsed_mins:.0f}/{target_mins}min)
+{recent_buddy}
+Style: {style_line}{"| HOST MODE" if proactive else ""}
+
+RESPOND (~60%): Help drive the presentation forward. React to key points, add value, guide to next section when current one is wrapping up. Your job is to keep momentum.
+WAIT (~40%): Only when speaker is clearly mid-sentence, just started talking, or transcript is noise/filler (<4 words).
+
+respond or wait? JSON: {{"action":"respond|wait","mood":"happy|excited|curious|thinking|surprised|friendly|amused|skeptical|confident","gesture":"nod|wave|think_hand|present|none","reason":"brief"}}"""
+
+    llm_provider = _get_two_stage_llm()
+
+    try:
+        if llm_provider == "gemini":
+            gemini = get_client()
+            system_prompt = "Quick decision: respond or wait? ONLY valid JSON."
+            response = await gemini.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"{system_prompt}\n\n{prompt}",
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=80,
+                    response_mime_type="application/json",
+                )
+            )
+            text = clean_json_response(response.text)
+        else:
+            grok = get_grok_client()
+            response = await grok.chat.completions.create(
+                model="grok-3-mini",
+                messages=[
+                    {"role": "system", "content": "Quick decision: respond or wait? ONLY valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=80,
+                reasoning_effort="low",
+                response_format={"type": "json_object"}
+            )
+            text = clean_json_response(response.choices[0].message.content)
+
+        result = json.loads(text)
+        stage1_time = _time.time() - stage1_start
+        print(f"[Brain Stage 1] ({llm_provider}) Decision: {result.get('action')} mood={result.get('mood')} in {stage1_time:.2f}s")
+        result["_stage1_time"] = stage1_time
+        return result
+
+    except Exception as e:
+        print(f"[Brain Stage 1] ({llm_provider}) Error: {e}")
+        return {"action": "wait", "mood": "neutral", "gesture": "none", "reason": f"error: {e}"}
+
+
+def _extract_sentences_from_stream(buffer: str) -> tuple[list[str], str]:
+    """Extract complete sentences from a growing buffer.
+
+    Returns: (complete_sentences, remaining_buffer)
+    """
+    if not buffer:
+        return [], ""
+
+    sentences = []
+    # Split on sentence boundaries: .!? followed by space or end
+    # But preserve action tags like [mood:happy]
+    parts = re.split(r'(?<=[.!?])\s+', buffer)
+
+    if len(parts) <= 1:
+        # No complete sentence boundary found yet
+        return [], buffer
+
+    # All parts except the last are complete sentences
+    for part in parts[:-1]:
+        stripped = part.strip()
+        if stripped:
+            sentences.append(stripped)
+
+    # Last part is the remaining buffer (may be incomplete)
+    remaining = parts[-1].strip()
+    return sentences, remaining
+
+
+async def generate_response_streaming(
+    session_id: str,
+    transcript: str,
+    stage1_result: dict,
+    style: str = "balanced",
+    personality: str = "neutral",
+    supports_emotions: bool = False,
+    elapsed_mins: float = 0,
+    target_mins: int = 10,
+    sections_done: list = None,
+    timeline: list = None,
+    proactive: bool = False,
+):
+    """Stage 2: Stream content generation. AsyncGenerator yielding sentences.
+
+    Yields dicts:
+        {"type": "sentence", "text": "..."}  — complete sentence ready for TTS
+        {"type": "done", "full_text": "..."}  — stream finished
+    """
+    import time as _time
+    stage2_start = _time.time()
+
+    ctx = await _build_brain_context(
+        session_id, transcript, style, personality, supports_emotions,
+        elapsed_mins, target_mins, sections_done, timeline, proactive,
+        detail_level="full"
+    )
+
+    if ctx is None:
+        yield {"type": "done", "full_text": ""}
+        return
+
+    mood = stage1_result.get("mood", "friendly")
+
+    # Build Stage 2 prompt — plain text output with avatar tags, no JSON
+    prompt = f"""You are Buddy, co-host on a tech stream.
+{ctx["style_instructions"]}
+{ctx["proactive_instructions"]}
+{ctx["personality_instructions"]}
+{ctx["emotion_instructions"]}
+{ctx["avatar_instructions"]}
+{ctx["timing_context"]}
+{ctx["stt_guide"]}
+STREAM OUTLINE (✓=covered, ○=remaining):
+{chr(10).join(ctx["script_summary"])}
+{ctx["timeline_context"]}
+{ctx["buddy_said"]}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎤 NOW SPEAKING: "{transcript}"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You're feeling {mood}. Generate your response.
+
+Output ONLY the response text with avatar action tags. No JSON wrapping.
+Start with [mood:{mood}] and embed [gesture:Y] [head:Z] tags naturally throughout.
+1-2 sentences max. Be concise."""
+
+    if proactive:
+        system_prompt = "You are Buddy, a charismatic TALK SHOW HOST. Output ONLY your response text with [mood:X] [gesture:Y] tags. No JSON. MAX 2 sentences."
+    else:
+        system_prompt = "You are Buddy, a supportive AI co-host with a VTuber avatar. Output ONLY your response text with [mood:X] [gesture:Y] tags. No JSON. ONLY discuss script topics."
+
+    llm_provider = _get_two_stage_llm()
+    buffer = ""
+    full_text = ""
+    sentences_yielded = 0
+
+    try:
+        if llm_provider == "gemini":
+            gemini = get_client()
+            stream = await gemini.aio.models.generate_content_stream(
+                model="gemini-2.0-flash",
+                contents=f"{system_prompt}\n\n{prompt}",
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=500,
+                )
+            )
+
+            async for chunk in stream:
+                if chunk.text:
+                    buffer += chunk.text
+                    full_text += chunk.text
+
+                    sentences, buffer = _extract_sentences_from_stream(buffer)
+                    for sentence in sentences:
+                        sentences_yielded += 1
+                        print(f"[Brain Stage 2] ({llm_provider}) Sentence {sentences_yielded} yielded at {_time.time()-stage2_start:.2f}s: '{sentence[:60]}...'")
+                        yield {"type": "sentence", "text": sentence}
+        else:
+            grok = get_grok_client()
+            stream = await grok.chat.completions.create(
+                model="grok-3-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500,
+                stream=True
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    buffer += delta.content
+                    full_text += delta.content
+
+                    sentences, buffer = _extract_sentences_from_stream(buffer)
+                    for sentence in sentences:
+                        sentences_yielded += 1
+                        print(f"[Brain Stage 2] ({llm_provider}) Sentence {sentences_yielded} yielded at {_time.time()-stage2_start:.2f}s: '{sentence[:60]}...'")
+                        yield {"type": "sentence", "text": sentence}
+
+        # Flush remaining buffer as final sentence
+        if buffer.strip():
+            sentences_yielded += 1
+            print(f"[Brain Stage 2] ({llm_provider}) Final sentence {sentences_yielded} at {_time.time()-stage2_start:.2f}s: '{buffer.strip()[:60]}...'")
+            yield {"type": "sentence", "text": buffer.strip()}
+
+        stage2_time = _time.time() - stage2_start
+        print(f"[Brain Stage 2] ({llm_provider}) Complete: {sentences_yielded} sentences in {stage2_time:.2f}s")
+        yield {"type": "done", "full_text": full_text}
+
+    except Exception as e:
+        print(f"[Brain Stage 2] ({llm_provider}) Error: {e}")
+        if buffer.strip():
+            yield {"type": "sentence", "text": buffer.strip()}
+        yield {"type": "done", "full_text": full_text}
+
+
+def _check_repetition(speak_text: str, state: dict) -> bool:
+    """Check if response is too similar to buddy history. Returns True if repetition detected."""
+    if "buddy_history" not in state:
+        state["buddy_history"] = []
+
+    speak_clean = strip_action_tags(speak_text).lower()
+
+    for prev in state["buddy_history"]:
+        prev_lower = strip_action_tags(prev).lower()
+        if speak_clean == prev_lower:
+            return True
+        speak_words = set(speak_clean.split())
+        prev_words = set(prev_lower.split())
+        if len(speak_words) > 0 and len(prev_words) > 0:
+            overlap = len(speak_words & prev_words) / max(len(speak_words), len(prev_words))
+            if overlap > 0.7:
+                return True
+
+    overused_patterns = [
+        "huh? really? how does that compare",
+        "really? how does that compare",
+        "how does that compare to the",
+        ", huh? really?",
+        "could also",
+        "you know what? that's similar",
+        "that's similar to how",
+        "similar to how",
+        "you know what? that's interesting",
+        "...you know what?",
+        "interesting... so",
+    ]
+    for pattern in overused_patterns:
+        if pattern in speak_clean:
+            return True
+
+    all_prev_text = " ".join([strip_action_tags(h) for h in state.get("buddy_history", [])]).lower()
+    speak_words = speak_clean.split()
+    for i in range(3, len(speak_words) - 3):
+        phrase = " ".join(speak_words[i:i+4])
+        if len(phrase) > 20 and phrase in all_prev_text:
+            print(f"[BLOCKED REPEATED PHRASE] '{phrase}'")
+            return True
+
+    return False
+
+
+def _update_buddy_history(speak_text: str, state: dict):
+    """Add response to buddy history and update conversation state."""
+    speak_clean = strip_action_tags(speak_text).lower()
+    state["buddy_history"] = state.get("buddy_history", [])
+    state["buddy_history"].append(speak_clean)
+    if len(state["buddy_history"]) > 4:
+        state["buddy_history"] = state["buddy_history"][-4:]
+    state["in_conversation"] = True
 
 
 async def get_current_prompt(session_id: str) -> str:

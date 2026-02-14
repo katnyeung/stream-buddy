@@ -16,8 +16,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from core.audio_buffer import AudioBuffer
 from core.stt_client import transcribe_audio, apply_stt_corrections
 from core.tts_client import text_to_speech, text_to_speech_stream, use_streaming
-from core.script_manager import parse_script, analyze_progress, get_current_prompt, match_section_keywords
+from core.script_manager import parse_script, analyze_progress, get_current_prompt, match_section_keywords, quick_decide_action, generate_response_streaming, _check_repetition, _update_buddy_history, strip_action_tags
 from core.redis_client import clear_session, store_session_state, get_session_state, get_script_structure, store_prediction_status
+from core.reactive_brain import generate_reactive_response
 
 # Prediction cache for pre-generated TTS (optional feature)
 try:
@@ -262,6 +263,277 @@ async def process_tts_buffered(
         logging.error(f"[{session_id}] Buffered TTS task error: {e}")
 
 
+async def process_tts_parallel(
+    sentences: list[str],
+    voice: str,
+    model: str,
+    websocket,
+    session_id: str,
+    avatar_redis=None,
+    max_concurrent: int = 3,
+):
+    """Process TTS for sentences concurrently, sending audio in strict sentence order.
+
+    Fires TTS for multiple sentences at once (bounded by semaphore),
+    but delivers results to the frontend in the original sentence order.
+    """
+    try:
+        if avatar_redis:
+            await avatar_redis.set_state(AvatarState.SPEAKING)
+
+        semaphore = asyncio.Semaphore(max_concurrent)
+        # results[i] will hold the TTS result for sentence i
+        results: dict[int, dict] = {}
+        done_events: dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(len(sentences))}
+        parallel_start = time.time()
+
+        async def generate_one(idx: int, sentence: str):
+            async with semaphore:
+                tts_start = time.time()
+                try:
+                    if use_streaming():
+                        # For streaming TTS, collect all chunks then store
+                        chunks = []
+                        async for audio_base64 in text_to_speech_stream(sentence, voice, model):
+                            chunks.append(audio_base64)
+                        results[idx] = {"chunks": chunks, "sentence": sentence}
+                        logging.info(f"[{session_id}] Parallel TTS {idx+1}/{len(sentences)} streamed in {time.time()-tts_start:.2f}s")
+                    else:
+                        audio_base64 = await text_to_speech(sentence, voice, model)
+                        results[idx] = {"audio": audio_base64, "sentence": sentence}
+                        logging.info(f"[{session_id}] Parallel TTS {idx+1}/{len(sentences)} in {time.time()-tts_start:.2f}s")
+                except Exception as e:
+                    logging.error(f"[{session_id}] Parallel TTS error for sentence {idx+1}: {e}")
+                    results[idx] = None
+                finally:
+                    done_events[idx].set()
+
+        # Launch all TTS tasks concurrently
+        tasks = [asyncio.create_task(generate_one(i, s)) for i, s in enumerate(sentences)]
+
+        # Send results to websocket in strict order as they complete
+        for i in range(len(sentences)):
+            await done_events[i].wait()
+            result = results.get(i)
+            if result is None:
+                continue
+            try:
+                if "chunks" in result:
+                    for chunk_idx, audio_base64 in enumerate(result["chunks"]):
+                        await websocket.send_json({
+                            "type": "cohost_audio_queued",
+                            "text": result["sentence"] if chunk_idx == 0 else "",
+                            "audio_base64": audio_base64,
+                            "is_stream_chunk": True,
+                            "chunk_index": chunk_idx + 1
+                        })
+                else:
+                    await websocket.send_json({
+                        "type": "cohost_audio_queued",
+                        "text": result["sentence"],
+                        "audio_base64": result["audio"]
+                    })
+            except Exception as e:
+                logging.error(f"[{session_id}] Parallel TTS send error for sentence {i+1}: {e}")
+
+        # Wait for all tasks to complete (cleanup)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        total_time = time.time() - parallel_start
+        logging.info(f"[{session_id}] [TIMING] Parallel TTS complete: {len(sentences)} sentences in {total_time:.2f}s (max_concurrent={max_concurrent})")
+    except Exception as e:
+        logging.error(f"[{session_id}] Parallel TTS task error: {e}")
+
+
+def _use_parallel_tts() -> bool:
+    """Check if parallel TTS is enabled via env."""
+    return os.getenv("ENABLE_PARALLEL_TTS", "false").lower() == "true"
+
+
+def _parallel_tts_max_concurrent() -> int:
+    """Get max concurrent TTS tasks from env."""
+    try:
+        return int(os.getenv("PARALLEL_TTS_MAX_CONCURRENT", "3"))
+    except ValueError:
+        return 3
+
+
+def _use_two_stage_brain() -> bool:
+    """Check if two-stage brain is enabled via env."""
+    return os.getenv("ENABLE_TWO_STAGE_BRAIN", "false").lower() == "true"
+
+
+def _use_reactive_brain() -> bool:
+    """Check if reactive brain (filler on WAIT) is enabled via env."""
+    return os.getenv("ENABLE_REACTIVE_BRAIN", "false").lower() == "true"
+
+
+def _reactive_brain_cooldown() -> float:
+    """Minimum seconds between reactive responses."""
+    return float(os.getenv("REACTIVE_BRAIN_COOLDOWN", "15"))
+
+
+def _reactive_max_per_minute() -> int:
+    """Maximum reactive responses per rolling minute."""
+    return int(os.getenv("REACTIVE_MAX_PER_MINUTE", "3"))
+
+
+async def process_brain_two_stage(
+    session_id: str,
+    transcript: str,
+    style: str,
+    personality: str,
+    supports_emotions: bool,
+    elapsed_mins: float,
+    target_mins: int,
+    sections_done: list,
+    timeline: list,
+    proactive: bool,
+    voice: str,
+    tts_model: str,
+    websocket,
+    avatar_redis=None,
+    avatar_action_parser=None,
+) -> dict:
+    """Two-stage brain: Quick Decision → Stream Content → Parallel TTS.
+
+    Returns a result dict compatible with analyze_progress() output.
+    """
+    # === Stage 1: Quick Decision ===
+    stage1_result = await quick_decide_action(
+        session_id, transcript, style, personality,
+        elapsed_mins, target_mins, sections_done, timeline, proactive
+    )
+
+    action = stage1_result.get("action", "wait")
+    mood = stage1_result.get("mood", "neutral")
+    gesture = stage1_result.get("gesture", "none")
+
+    # Immediate avatar reaction from Stage 1
+    if avatar_redis:
+        try:
+            from vtuber_engine.models.state import AvatarState as _AS
+            if action == "wait":
+                # Set a mood even when waiting (avatar looks alive)
+                await avatar_redis.set_mood(mood, 1.0)
+            else:
+                await avatar_redis.set_mood(mood, 1.0)
+                if gesture and gesture != "none":
+                    await avatar_redis.queue_gesture(gesture, source="llm", intensity=1.0)
+        except Exception as e:
+            logging.warning(f"[{session_id}] Stage 1 avatar update error: {e}")
+
+    if action == "wait":
+        logging.info(f"[{session_id}] [TIMING] Two-stage: WAIT decision in {stage1_result.get('_stage1_time', 0):.2f}s")
+        return {
+            "action": "wait",
+            "speak_text": "",
+            "reason": stage1_result.get("reason", "wait"),
+            "pacing_hint": "",
+            "mood": mood,
+            "gesture": gesture,
+        }
+
+    # === Stage 2: Stream Content + Fire TTS per sentence ===
+    sentences = []
+    full_text = ""
+    tts_tasks = []
+    sentence_results = {}
+    sentence_events = {}
+    max_concurrent = _parallel_tts_max_concurrent() if _use_parallel_tts() else 1
+    tts_semaphore = asyncio.Semaphore(max_concurrent)
+    stage2_start = time.time()
+
+    async def tts_for_sentence(idx: int, sentence_text: str):
+        """Fire TTS for a single sentence, bounded by semaphore."""
+        async with tts_semaphore:
+            tts_start = time.time()
+            try:
+                if use_streaming():
+                    chunks = []
+                    async for audio_base64 in text_to_speech_stream(sentence_text, voice, tts_model):
+                        chunks.append(audio_base64)
+                    sentence_results[idx] = {"chunks": chunks, "sentence": sentence_text}
+                else:
+                    audio_base64 = await text_to_speech(sentence_text, voice, tts_model)
+                    sentence_results[idx] = {"audio": audio_base64, "sentence": sentence_text}
+                logging.info(f"[{session_id}] [TIMING] Stage2 TTS sentence {idx+1} in {time.time()-tts_start:.2f}s")
+            except Exception as e:
+                logging.error(f"[{session_id}] Stage2 TTS error sentence {idx+1}: {e}")
+                sentence_results[idx] = None
+            finally:
+                sentence_events[idx].set()
+
+    sentence_idx = 0
+    async for chunk in generate_response_streaming(
+        session_id, transcript, stage1_result,
+        style, personality, supports_emotions,
+        elapsed_mins, target_mins, sections_done, timeline, proactive
+    ):
+        if chunk["type"] == "sentence":
+            text = chunk["text"]
+            sentences.append(text)
+            idx = sentence_idx
+            sentence_events[idx] = asyncio.Event()
+            # Fire TTS immediately for this sentence
+            tts_tasks.append(asyncio.create_task(tts_for_sentence(idx, text)))
+            sentence_idx += 1
+
+        elif chunk["type"] == "done":
+            full_text = chunk.get("full_text", "")
+
+    # Send audio to websocket in strict sentence order
+    for i in range(len(sentences)):
+        if i in sentence_events:
+            await sentence_events[i].wait()
+        result = sentence_results.get(i)
+        if result is None:
+            continue
+        try:
+            if "chunks" in result:
+                for chunk_idx, audio_base64 in enumerate(result["chunks"]):
+                    await websocket.send_json({
+                        "type": "cohost_audio_queued",
+                        "text": result["sentence"] if chunk_idx == 0 else "",
+                        "audio_base64": audio_base64,
+                        "is_stream_chunk": True,
+                        "chunk_index": chunk_idx + 1
+                    })
+            else:
+                await websocket.send_json({
+                    "type": "cohost_audio_queued",
+                    "text": result["sentence"],
+                    "audio_base64": result["audio"]
+                })
+        except Exception as e:
+            logging.error(f"[{session_id}] Stage2 send error sentence {i+1}: {e}")
+
+    # Wait for all TTS tasks to finish (cleanup)
+    if tts_tasks:
+        await asyncio.gather(*tts_tasks, return_exceptions=True)
+
+    total_time = time.time() - stage2_start
+    stage1_time = stage1_result.get("_stage1_time", 0)
+    logging.info(f"[{session_id}] [TIMING] Two-stage complete: Stage1={stage1_time:.2f}s, Stage2+TTS={total_time:.2f}s, sentences={len(sentences)}")
+
+    # Post-processing: repetition check + history update
+    state = await get_session_state(session_id)
+    if state and full_text:
+        if _check_repetition(full_text, state):
+            logging.info(f"[{session_id}] [BLOCKED REPETITION] Two-stage response blocked (audio already sent)")
+            # Note: audio already sent - this is a rare edge case. Log it for monitoring.
+        else:
+            _update_buddy_history(full_text, state)
+        await store_session_state(session_id, state)
+
+    return {
+        "action": "respond",
+        "speak_text": full_text,
+        "reason": stage1_result.get("reason", "two-stage respond"),
+        "pacing_hint": "",
+    }
+
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -343,6 +615,11 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
     # Concurrent Brain processing
     brain_task = None  # Background task for Brain processing
     brain_processing = False  # Flag to prevent concurrent brain calls
+
+    # Reactive brain state (filler on WAIT)
+    last_reactive_time = 0
+    reactive_count_this_minute = 0
+    reactive_minute_start = 0
 
     # Prediction cache (optional feature - pre-generated TTS for keywords)
     prediction_cache = None
@@ -634,10 +911,17 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                 })
 
                                 sentences = split_into_sentences(welcome_text)
-                                asyncio.create_task(process_tts_background(
-                                    sentences, selected_voice, selected_tts_model,
-                                    websocket, session_id, avatar_redis
-                                ))
+                                if _use_parallel_tts():
+                                    asyncio.create_task(process_tts_parallel(
+                                        sentences, selected_voice, selected_tts_model,
+                                        websocket, session_id, avatar_redis,
+                                        max_concurrent=_parallel_tts_max_concurrent()
+                                    ))
+                                else:
+                                    asyncio.create_task(process_tts_background(
+                                        sentences, selected_voice, selected_tts_model,
+                                        websocket, session_id, avatar_redis
+                                    ))
                         else:
                             # === NORMAL MODE: User speaks first, AI responds ===
                             is_speaking = False
@@ -984,6 +1268,123 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
 
                             async def process_brain_background():
                                 nonlocal brain_processing, is_speaking, pending_response, last_prompt, last_remind_time, all_sections_covered, accumulated_transcript
+                                nonlocal last_reactive_time, reactive_count_this_minute, reactive_minute_start
+
+                                async def try_reactive_response(transcript_text, mood="friendly", gesture="nod"):
+                                    """Try to generate and play a reactive filler response on WAIT."""
+                                    nonlocal last_reactive_time, reactive_count_this_minute, reactive_minute_start, is_speaking
+
+                                    # Guard: feature flag
+                                    if not _use_reactive_brain():
+                                        return
+                                    # Guard: already speaking
+                                    if is_speaking:
+                                        logger.info(f"[{session_id}] Reactive: skipped (already speaking)")
+                                        return
+                                    # Guard: cooldown
+                                    now = time.time()
+                                    cooldown = _reactive_brain_cooldown()
+                                    if now - last_reactive_time < cooldown:
+                                        logger.info(f"[{session_id}] Reactive: skipped (cooldown {cooldown}s)")
+                                        return
+                                    # Guard: rate limit (rolling minute)
+                                    max_per_min = _reactive_max_per_minute()
+                                    if now - reactive_minute_start > 60:
+                                        reactive_minute_start = now
+                                        reactive_count_this_minute = 0
+                                    if reactive_count_this_minute >= max_per_min:
+                                        logger.info(f"[{session_id}] Reactive: skipped (rate limit {max_per_min}/min)")
+                                        return
+
+                                    reactive_start = time.time()
+                                    try:
+                                        # Get buddy history + section titles from session state
+                                        state = await get_session_state(session_id) or {}
+                                        buddy_history = state.get("buddy_history", [])
+                                        structure = await get_script_structure(session_id)
+                                        section_titles = []
+                                        if structure:
+                                            section_titles = [s.get("title", "") for s in structure.get("sections", [])]
+
+                                        # Call reactive LLM
+                                        reactive_text = await generate_reactive_response(
+                                            transcript=transcript_text,
+                                            mood_hint=mood,
+                                            gesture_hint=gesture if gesture and gesture != "none" else "nod",
+                                            buddy_history=buddy_history,
+                                            section_titles=section_titles,
+                                        )
+
+                                        if not reactive_text:
+                                            logger.info(f"[{session_id}] Reactive: LLM returned None")
+                                            return
+
+                                        # TTS
+                                        tts_start = time.time()
+                                        audio_base64 = await text_to_speech(reactive_text, selected_voice, selected_tts_model)
+                                        tts_time = time.time() - tts_start
+
+                                        if not audio_base64:
+                                            logger.info(f"[{session_id}] Reactive: TTS returned empty")
+                                            return
+
+                                        # Deliver
+                                        is_speaking = True
+
+                                        # Avatar state
+                                        if avatar_redis and avatar_action_parser:
+                                            try:
+                                                await avatar_redis.set_state(AvatarState.SPEAKING)
+                                                parsed = avatar_action_parser.parse(reactive_text)
+                                                for action_item in parsed.get("actions", []):
+                                                    action_type = action_item["type"]
+                                                    action_name = action_item["name"]
+                                                    action_params = action_item.get("params", {})
+                                                    intensity = action_params.get("intensity", 1.0)
+                                                    if action_type == "mood":
+                                                        await avatar_redis.set_mood(action_name, intensity)
+                                                    elif action_type in ("gesture", "eye", "head", "body", "brow"):
+                                                        await avatar_redis.queue_gesture(action_name, source="llm", intensity=intensity)
+                                                    elif action_type == "action":
+                                                        await avatar_redis.send_action(action_name, action_params)
+                                            except Exception as e:
+                                                logger.warning(f"[{session_id}] Reactive avatar error: {e}")
+
+                                        # Send to frontend
+                                        await websocket.send_json({
+                                            "type": "cohost_speaking",
+                                            "text": reactive_text,
+                                            "reason": "reactive filler"
+                                        })
+                                        await websocket.send_json({
+                                            "type": "cohost_audio_queued",
+                                            "audio_base64": audio_base64,
+                                            "text": reactive_text,
+                                        })
+
+                                        # Update buddy history
+                                        _update_buddy_history(reactive_text, state)
+                                        await store_session_state(session_id, state)
+
+                                        # Update rate limiting
+                                        last_reactive_time = time.time()
+                                        reactive_count_this_minute += 1
+
+                                        # Timeline
+                                        elapsed_secs = time.time() - session_start_time if session_start_time else 0
+                                        conversation_timeline.append({
+                                            "time": format_timestamp(elapsed_secs),
+                                            "speaker": "Buddy",
+                                            "text": reactive_text
+                                        })
+                                        if len(conversation_timeline) > 10:
+                                            conversation_timeline.pop(0)
+
+                                        total_time = time.time() - reactive_start
+                                        logger.info(f"[{session_id}] Reactive LLM in {tts_start - reactive_start:.2f}s, TTS in {tts_time:.2f}s, total: {total_time:.2f}s")
+
+                                    except Exception as e:
+                                        logger.error(f"[{session_id}] Reactive error: {e}", exc_info=True)
 
                                 brain_start = time.time()
 
@@ -994,6 +1395,191 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
 
                                     supports_emotions = selected_tts_model == "eleven_multilingual_v2"
 
+                                    # === Two-Stage Brain path ===
+                                    if _use_two_stage_brain():
+                                        logger.info(f"[{session_id}] Two-stage brain started (background, {accumulated_word_count} words, auto={auto_response_enabled})")
+
+                                        if auto_response_enabled:
+                                            # Auto mode: two-stage handles brain + TTS delivery
+                                            result = await process_brain_two_stage(
+                                                session_id=session_id,
+                                                transcript=transcript_to_analyze,
+                                                style=selected_style,
+                                                personality=selected_personality,
+                                                supports_emotions=supports_emotions,
+                                                elapsed_mins=elapsed_mins,
+                                                target_mins=target_duration_mins,
+                                                sections_done=list(all_sections_covered),
+                                                timeline=conversation_timeline,
+                                                proactive=proactive_mode,
+                                                voice=selected_voice,
+                                                tts_model=selected_tts_model,
+                                                websocket=websocket,
+                                                avatar_redis=avatar_redis,
+                                                avatar_action_parser=avatar_action_parser,
+                                            )
+
+                                            action = result.get("action", "wait")
+                                            brain_time = time.time() - brain_start
+
+                                            state = await get_session_state(session_id) or {}
+                                            state["all_sections_covered"] = list(all_sections_covered)
+                                            await store_session_state(session_id, state)
+
+                                            logger.info(f"[{session_id}] Two-stage brain completed in {brain_time:.2f}s: action={action}")
+
+                                            await websocket.send_json({
+                                                "type": "sections_progress",
+                                                "sections_covered": list(all_sections_covered),
+                                                "elapsed_mins": round(elapsed_mins, 1),
+                                                "target_mins": target_duration_mins,
+                                                "pacing_hint": result.get("pacing_hint", "")
+                                            })
+
+                                            if action in ("respond", "enrich"):
+                                                speak_text = result.get("speak_text", "")
+                                                if speak_text:
+                                                    is_speaking = True
+
+                                                    if avatar_redis and avatar_action_parser:
+                                                        await avatar_redis.set_state(AvatarState.SPEAKING)
+                                                        parsed = avatar_action_parser.parse(speak_text)
+                                                        for action_item in parsed.get("actions", []):
+                                                            action_type = action_item["type"]
+                                                            action_name = action_item["name"]
+                                                            action_params = action_item.get("params", {})
+                                                            intensity = action_params.get("intensity", 1.0)
+                                                            if action_type == "mood":
+                                                                await avatar_redis.set_mood(action_name, intensity)
+                                                            elif action_type == "gesture":
+                                                                await avatar_redis.queue_gesture(action_name, source="llm", intensity=intensity)
+                                                            elif action_type == "action":
+                                                                await avatar_redis.send_action(action_name, action_params)
+                                                            elif action_type in ("eye", "head", "body", "brow"):
+                                                                await avatar_redis.queue_gesture(action_name, source="llm", intensity=intensity)
+
+                                                    brain_now = time.time()
+                                                    elapsed_secs = brain_now - session_start_time if session_start_time else 0
+                                                    conversation_timeline.append({
+                                                        "time": format_timestamp(elapsed_secs),
+                                                        "speaker": "Buddy",
+                                                        "text": speak_text
+                                                    })
+                                                    if len(conversation_timeline) > 10:
+                                                        conversation_timeline.pop(0)
+
+                                                    audio_buffer.clear_all()
+
+                                                    await websocket.send_json({
+                                                        "type": "cohost_speaking",
+                                                        "text": speak_text,
+                                                        "reason": result.get("reason", "")
+                                                    })
+                                                    # TTS already sent by process_brain_two_stage()
+
+                                            elif action == "wait" and auto_response_enabled:
+                                                # Reactive brain: filler on WAIT (auto two-stage path)
+                                                asyncio.create_task(try_reactive_response(
+                                                    transcript_to_analyze,
+                                                    result.get("mood", "friendly"),
+                                                    result.get("gesture", "nod"),
+                                                ))
+
+                                        else:
+                                            # Manual mode: use two-stage for fast brain decision,
+                                            # then buffer TTS via legacy process_tts_buffered()
+                                            stage1_result = await quick_decide_action(
+                                                session_id, transcript_to_analyze,
+                                                selected_style, selected_personality,
+                                                elapsed_mins, target_duration_mins,
+                                                list(all_sections_covered), conversation_timeline,
+                                                proactive_mode
+                                            )
+
+                                            action = stage1_result.get("action", "wait")
+                                            mood = stage1_result.get("mood", "neutral")
+
+                                            # Immediate avatar mood from Stage 1
+                                            if avatar_redis:
+                                                try:
+                                                    await avatar_redis.set_mood(mood, 1.0)
+                                                    gesture = stage1_result.get("gesture", "none")
+                                                    if gesture and gesture != "none":
+                                                        await avatar_redis.queue_gesture(gesture, source="llm", intensity=1.0)
+                                                except Exception as e:
+                                                    logging.warning(f"[{session_id}] Stage 1 avatar error: {e}")
+
+                                            brain_time = time.time() - brain_start
+
+                                            state = await get_session_state(session_id) or {}
+                                            state["all_sections_covered"] = list(all_sections_covered)
+                                            await store_session_state(session_id, state)
+
+                                            await websocket.send_json({
+                                                "type": "sections_progress",
+                                                "sections_covered": list(all_sections_covered),
+                                                "elapsed_mins": round(elapsed_mins, 1),
+                                                "target_mins": target_duration_mins,
+                                                "pacing_hint": ""
+                                            })
+
+                                            if action in ("respond", "enrich"):
+                                                # Stage 2: stream content, collect full text
+                                                full_text = ""
+                                                async for chunk in generate_response_streaming(
+                                                    session_id, transcript_to_analyze, stage1_result,
+                                                    selected_style, selected_personality, supports_emotions,
+                                                    elapsed_mins, target_duration_mins,
+                                                    list(all_sections_covered), conversation_timeline, proactive_mode
+                                                ):
+                                                    if chunk["type"] == "sentence":
+                                                        pass  # Accumulate via done
+                                                    elif chunk["type"] == "done":
+                                                        full_text = chunk.get("full_text", "")
+
+                                                if full_text:
+                                                    speak_text = full_text
+                                                    # Repetition check
+                                                    rep_state = await get_session_state(session_id) or {}
+                                                    if _check_repetition(speak_text, rep_state):
+                                                        logger.info(f"[{session_id}] [BLOCKED REPETITION] Two-stage manual")
+                                                    else:
+                                                        _update_buddy_history(speak_text, rep_state)
+                                                        await store_session_state(session_id, rep_state)
+
+                                                        pending_audio_chunks.clear()
+                                                        pending_audio_ready = False
+                                                        pending_response = {
+                                                            "speak_text": speak_text,
+                                                            "result": {"reason": stage1_result.get("reason", "two-stage")}
+                                                        }
+
+                                                        logger.info(f"[{session_id}] Two-stage manual: '{speak_text[:60]}...' - buffering TTS")
+
+                                                        await websocket.send_json({
+                                                            "type": "response_pending",
+                                                            "text": speak_text,
+                                                            "reason": stage1_result.get("reason", "")
+                                                        })
+
+                                                        sentences = split_into_sentences(speak_text)
+                                                        asyncio.create_task(process_tts_buffered(
+                                                            sentences, selected_voice, selected_tts_model,
+                                                            websocket, session_id, pending_audio_chunks,
+                                                            speak_text, pending_response["result"]
+                                                        ))
+                                            else:
+                                                logger.info(f"[{session_id}] Two-stage manual: WAIT in {brain_time:.2f}s")
+                                                # Reactive brain: filler on WAIT (manual two-stage path)
+                                                asyncio.create_task(try_reactive_response(
+                                                    transcript_to_analyze,
+                                                    stage1_result.get("mood", "friendly"),
+                                                    stage1_result.get("gesture", "nod"),
+                                                ))
+
+                                        return  # Two-stage path complete
+
+                                    # === Legacy single-stage Brain path ===
                                     logger.info(f"[{session_id}] Brain started (background, {accumulated_word_count} words)")
 
                                     result = await analyze_progress(
@@ -1088,10 +1674,17 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                                 # Split into sentences and process TTS in background (non-blocking)
                                                 sentences = split_into_sentences(speak_text)
                                                 logger.info(f"[{session_id}] Brain response: queueing {len(sentences)} sentences for background TTS")
-                                                asyncio.create_task(process_tts_background(
-                                                    sentences, selected_voice, selected_tts_model,
-                                                    websocket, session_id, avatar_redis
-                                                ))
+                                                if _use_parallel_tts():
+                                                    asyncio.create_task(process_tts_parallel(
+                                                        sentences, selected_voice, selected_tts_model,
+                                                        websocket, session_id, avatar_redis,
+                                                        max_concurrent=_parallel_tts_max_concurrent()
+                                                    ))
+                                                else:
+                                                    asyncio.create_task(process_tts_background(
+                                                        sentences, selected_voice, selected_tts_model,
+                                                        websocket, session_id, avatar_redis
+                                                    ))
 
                                             else:
                                                 # Manual mode: start TTS processing but buffer audio
@@ -1120,6 +1713,14 @@ async def websocket_stream(websocket: WebSocket, session: str = None):
                                                     websocket, session_id, pending_audio_chunks,
                                                     speak_text, result
                                                 ))
+
+                                    elif action == "wait":
+                                        # Reactive brain: filler on WAIT (legacy path)
+                                        asyncio.create_task(try_reactive_response(
+                                            transcript_to_analyze,
+                                            "friendly",
+                                            "nod",
+                                        ))
 
                                     elif action == "remind":
                                         prompt_text = result.get("prompt_text", "")
