@@ -1089,8 +1089,9 @@ respond or wait? JSON: {{"action":"respond|wait","mood":"happy|excited|curious|t
         if llm_provider == "gemini":
             gemini = get_client()
             system_prompt = "Quick decision: respond or wait? ONLY valid JSON."
+            stage1_model = os.getenv("TWO_STAGE_MODEL", "gemini-1.5-flash")
             response = await gemini.aio.models.generate_content(
-                model="gemini-2.0-flash",
+                model=stage1_model,
                 contents=f"{system_prompt}\n\n{prompt}",
                 config=types.GenerateContentConfig(
                     temperature=0.2,

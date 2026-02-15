@@ -150,6 +150,11 @@ class PredictionCache:
                 'main point', 'main points', 'any questions', 'wrap up', 'introduction', 'conclusion'
             }
 
+            # Build section_id → title lookup from original sections
+            section_title_map = {}
+            for section in sections:
+                section_title_map[section.get("id", 0)] = section.get("title", "")
+
             for section_pred in predictions:
                 # Stop if we've reached the limit
                 if generated_count >= max_predictions:
@@ -157,6 +162,8 @@ class PredictionCache:
                     break
 
                 section_id = section_pred.get("section_id")
+                section_label = section_pred.get("section_label", "Core")
+                section_title = section_title_map.get(section_id, "")
                 for pred in section_pred.get("predictions", []):
                     # Stop if we've reached the limit
                     if generated_count >= max_predictions:
@@ -200,7 +207,9 @@ class PredictionCache:
                         self.keyword_map[keyword] = {
                             "section_id": section_id,
                             "cache_key": cache_key,
-                            "response": response
+                            "response": response,
+                            "section_label": section_label,
+                            "section_title": section_title
                         }
 
                         generated_count += 1
@@ -220,7 +229,9 @@ class PredictionCache:
                 keywords_with_responses.append({
                     "keyword": keyword,
                     "response": clean_response[:80] + "..." if len(clean_response) > 80 else clean_response,
-                    "section_id": entry["section_id"]
+                    "section_id": entry["section_id"],
+                    "section_label": entry.get("section_label", "Core"),
+                    "section_title": entry.get("section_title", "")
                 })
 
             logger.info(f"[{self.session_id}] Prediction cache: {generated_count} cached, {skipped_count} skipped in {elapsed:.1f}s")
@@ -276,6 +287,9 @@ class PredictionCache:
         # Store excluded keywords for filtering
         self._excluded_keywords = all_section_keywords
 
+        # Determine total sections for position labeling
+        total_sections = len(sections_context)
+
         prompt = f"""Generate keyword→response predictions for an AI co-host during a live stream presentation.
 
 For EACH section, generate exactly 1 keyword trigger based on the section's MOST IMPORTANT topic.
@@ -285,17 +299,22 @@ RULES:
 2. AVOID generic phrases: your role, key takeaways, core concepts, real examples, final thoughts
 3. Responses: 1-2 sentences with [mood:X] tag (friendly/curious/excited/thoughtful)
 4. Only 1 prediction per section (total 5-6 keywords max)
+5. For each prediction, include "section_label": a short label classifying the section's role in the presentation.
+   Use one of: "Intro", "Core", or "Ending". The first section is typically "Intro", the last section is typically "Ending", and sections in between are "Core".
+
+There are {total_sections} sections total.
 
 Sections:
 {json.dumps(sections_context, indent=2)}
 
 Output JSON array with exactly 1 prediction per section:
 [
-  {{"section_id": 1, "predictions": [
-    {{"keyword": "<topic from this section>", "response": "[mood:friendly] Response about that topic..."}},
-    {{"keyword": "<another topic>", "response": "[mood:curious] Another response..."}}
+  {{"section_id": 1, "section_label": "Intro", "predictions": [
+    {{"keyword": "<topic from this section>", "response": "[mood:friendly] Response about that topic..."}}
   ]}},
-  {{"section_id": 2, "predictions": [...]}}
+  {{"section_id": 2, "section_label": "Core", "predictions": [
+    {{"keyword": "<another topic>", "response": "[mood:curious] Another response..."}}
+  ]}}
 ]
 
 Only output valid JSON, no markdown."""
@@ -633,150 +652,6 @@ Only output valid JSON, no markdown."""
             logger.error(f"[{self.session_id}] Failed to preload welcome speech: {e}")
 
         return False
-
-    async def generate_dynamic_predictions(
-        self,
-        next_section_id: int,
-        recent_transcript: str,
-        structure: dict,
-        voice: str,
-        tts_model: str,
-        websocket=None
-    ) -> list[dict]:
-        """
-        Generate context-aware predictions for upcoming section.
-        Called when a section is completed to preload next section's likely keywords.
-
-        Args:
-            next_section_id: 1-indexed section ID to generate predictions for
-            recent_transcript: Recent conversation context
-            structure: Full script structure
-            voice: TTS voice ID
-            tts_model: TTS model name
-            websocket: WebSocket to send status updates
-
-        Returns:
-            List of generated predictions
-        """
-        from core.redis_client import store_voice_cache
-        from core.tts_client import text_to_speech
-
-        sections = structure.get("sections", [])
-        if next_section_id < 1 or next_section_id > len(sections):
-            logger.warning(f"[{self.session_id}] Invalid section for dynamic prediction: {next_section_id}")
-            return []
-
-        section = sections[next_section_id - 1]
-        section_title = section.get("title", f"Section {next_section_id}")
-        key_points = section.get("key_points", [])[:3]
-
-        # Get key points as text
-        points_text = []
-        for p in key_points:
-            if isinstance(p, dict):
-                points_text.append(p.get("text", ""))
-            else:
-                points_text.append(str(p))
-
-        # Find the next available slot number
-        existing_slots = set(self.keywordBySlot.keys()) if hasattr(self, 'keywordBySlot') else set()
-        next_slot = len(self.keyword_map) + 1
-
-        # Notify frontend that we're generating
-        if websocket:
-            try:
-                await websocket.send_json({
-                    "type": "cache_slot_loading",
-                    "key": next_slot
-                })
-            except Exception:
-                pass
-
-        prompt = f"""Based on the conversation context and upcoming topic, generate 1 likely follow-up question/topic.
-
-Recent conversation:
-{recent_transcript[-300:] if recent_transcript else 'No recent conversation'}
-
-Upcoming topic: {section_title}
-Key points: {', '.join(points_text)}
-
-Generate ONE keyword (2-3 words) that the presenter might mention, and a brief response.
-Output JSON: {{"keyword": "...", "response": "[mood:friendly] ..."}}
-
-Only output valid JSON, no markdown."""
-
-        try:
-            client = get_grok_client()
-            response = await client.chat.completions.create(
-                model="grok-3-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=500
-            )
-
-            content = response.choices[0].message.content.strip()
-
-            # Parse JSON
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-
-            prediction = json.loads(content)
-            keyword = prediction.get("keyword", "").lower().strip()
-            response_text = prediction.get("response", "")
-
-            if not keyword or not response_text:
-                logger.warning(f"[{self.session_id}] Dynamic prediction empty")
-                return []
-
-            # Generate TTS
-            clean_response = self._strip_action_tags(response_text)
-            audio_base64 = await text_to_speech(clean_response, voice, tts_model)
-
-            if not audio_base64:
-                logger.warning(f"[{self.session_id}] Dynamic TTS failed for '{keyword}'")
-                return []
-
-            # Store in Redis
-            cache_key = self._make_cache_key(next_section_id, keyword)
-            await store_voice_cache(
-                self.session_id,
-                next_section_id,
-                keyword,
-                response_text,
-                audio_base64
-            )
-
-            # Add to in-memory map
-            self.keyword_map[keyword] = {
-                "section_id": next_section_id,
-                "cache_key": cache_key,
-                "response": response_text
-            }
-
-            logger.info(f"[{self.session_id}] Dynamic prediction cached: '{keyword}' for section {next_section_id}")
-
-            # Notify frontend slot is ready
-            if websocket:
-                try:
-                    await websocket.send_json({
-                        "type": "cache_slot_ready",
-                        "key": next_slot,
-                        "keyword": keyword,
-                        "section_id": next_section_id
-                    })
-                except Exception:
-                    pass
-
-            return [{"keyword": keyword, "response": response_text, "section_id": next_section_id}]
-
-        except json.JSONDecodeError as e:
-            logger.error(f"[{self.session_id}] Dynamic prediction JSON parse error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"[{self.session_id}] Dynamic prediction failed: {e}")
-            return []
 
     async def get_welcome_speech(self) -> Optional[dict]:
         """
