@@ -4,7 +4,7 @@
  */
 
 // VAD Constants
-const DEFAULT_PAUSE_DURATION = 2000;
+const DEFAULT_PAUSE_DURATION = 1000;
 const MAX_SPEECH_DURATION = 30000;
 const SILENCE_THRESHOLD = 8;
 const VAD_CHECK_INTERVAL = 100;
@@ -868,70 +868,9 @@ class OBSPanel {
                 this.addConversationItem('system', `⚡ Cache hit: "${msg.keyword}"`);
                 break;
 
-            case 'cache_slot_loading':
-                // Dynamic prediction being generated
-                console.log('[OBSPanel] Cache slot loading:', msg.key);
-                this.addLoadingSlot(msg.key);
-                break;
-
-            case 'cache_slot_ready':
-                // Dynamic prediction ready
-                console.log('[OBSPanel] Cache slot ready:', msg.key, msg.keyword);
-                this.updateSlotReady(msg.key, msg.keyword, msg.section_id);
-                break;
         }
     }
 
-    addLoadingSlot(keyNum) {
-        if (!this.cachedKeywordsList) return;
-
-        // Check if slot already exists
-        let row = this.cachedKeywordsList.querySelector(`[data-key="${keyNum}"]`);
-        if (row) {
-            // Update existing slot to loading
-            row.classList.remove('ready', 'triggered');
-            row.classList.add('loading');
-            row.querySelector('.keyword-text').textContent = '(generating...)';
-            row.querySelector('.status-icon').textContent = '⟳';
-        } else {
-            // Add new loading slot
-            const html = `<div class="cached-keyword-row loading" data-key="${keyNum}" data-keyword="">
-                <span class="hotkey-badge">${keyNum}</span>
-                <span class="keyword-text">(generating...)</span>
-                <span class="status-icon">⟳</span>
-            </div>`;
-            this.cachedKeywordsList.insertAdjacentHTML('beforeend', html);
-        }
-    }
-
-    updateSlotReady(keyNum, keyword, sectionId) {
-        if (!this.cachedKeywordsList) return;
-
-        let row = this.cachedKeywordsList.querySelector(`[data-key="${keyNum}"]`);
-        if (row) {
-            // Update existing slot
-            row.classList.remove('loading', 'triggered');
-            row.classList.add('ready');
-            row.dataset.keyword = keyword.toLowerCase();
-            row.querySelector('.keyword-text').textContent = keyword;
-            row.querySelector('.status-icon').textContent = '✓';
-        } else {
-            // Create new slot
-            const html = `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml(keyword.toLowerCase())}">
-                <span class="hotkey-badge">${keyNum}</span>
-                <span class="keyword-text">${this.escapeHtml(keyword)}</span>
-                <span class="status-icon">✓</span>
-            </div>`;
-            this.cachedKeywordsList.insertAdjacentHTML('beforeend', html);
-        }
-
-        // Update hotkey mapping
-        this.keywordByHotkey[keyNum] = {
-            keyword: keyword,
-            section_id: sectionId
-        };
-        console.log('[OBSPanel] Updated hotkey mapping:', keyNum, '->', keyword);
-    }
 
     // Play audio and send lip sync to overlay
     playSingleAudio(audioBase64, text, onComplete) {
@@ -1361,6 +1300,8 @@ class OBSPanel {
             const keyword = typeof item === 'string' ? item : (item.keyword || '');
             const response = typeof item === 'object' ? (item.response || '') : '';
             const sectionId = typeof item === 'object' ? (item.section_id || 0) : 0;
+            const sectionLabel = typeof item === 'object' ? (item.section_label || '') : '';
+            const sectionTitle = typeof item === 'object' ? (item.section_title || '') : '';
             const keyNum = index + 1;  // Keys 1-9
 
             console.log(`[OBSPanel] Processing keyword ${keyNum}:`, keyword, 'from item:', item);
@@ -1375,9 +1316,15 @@ class OBSPanel {
 
             const tooltipAttr = response ? `title="${this.escapeHtml(response)}"` : '';
 
+            // Section label badge color
+            const labelColor = sectionLabel === 'Intro' ? '#4ecdc4' : sectionLabel === 'Ending' ? '#ff6b6b' : '#a78bfa';
+            const labelBadge = sectionLabel ? `<span class="section-label-badge" style="background:${labelColor};color:#fff;font-size:0.6rem;padding:1px 4px;border-radius:3px;margin-right:4px;">${this.escapeHtml(sectionLabel)}</span>` : '';
+            const titleText = sectionTitle ? `<span class="section-title-text" style="color:#888;font-size:0.7rem;margin-left:4px;">${this.escapeHtml(sectionTitle)}</span>` : '';
+
             return `<div class="cached-keyword-row ready" data-key="${keyNum}" data-keyword="${this.escapeHtml((keyword || '').toLowerCase())}">
                 <span class="hotkey-badge">${keyNum <= 9 ? keyNum : '-'}</span>
-                <span class="keyword-text" ${tooltipAttr}>${this.escapeHtml(keyword || '(empty)')}</span>
+                ${labelBadge}<span class="keyword-text" ${tooltipAttr}>${this.escapeHtml(keyword || '(empty)')}</span>
+                ${titleText}
                 <span class="status-icon">✓</span>
             </div>`;
         }).join('');
